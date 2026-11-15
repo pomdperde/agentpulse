@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from agentpulse.cleanup import clean
 from agentpulse.config import Settings
 from agentpulse.llm import BudgetExceeded
 from agentpulse.orchestrator import ALL_SOURCES, Pipeline
@@ -94,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8123, help="监听端口（默认 8123）")
     serve.add_argument("--host", default="127.0.0.1", help="监听地址")
 
+    clean_cmd = sub.add_parser("clean", help="清理历史论文报告，释放磁盘空间")
+    clean_cmd.add_argument("--out", default="reports", help="报告根目录（默认 ./reports）")
+    clean_cmd.add_argument(
+        "--keep", type=int, default=20, help="保留最近 N 轮报告（默认 20，0 表示全删）"
+    )
+    clean_cmd.add_argument(
+        "--days", type=int, default=None, help="额外删除超过 N 天的报告"
+    )
+    clean_cmd.add_argument("--dry-run", action="store_true", help="只统计不删除")
+
     return parser
 
 
@@ -179,6 +190,35 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _clean(args: argparse.Namespace) -> int:
+    root = Path(args.out)
+    if not root.is_dir():
+        print(f"报告目录不存在：{root}", file=sys.stderr)
+        return 1
+    if args.keep < 0:
+        print("--keep 不能为负数", file=sys.stderr)
+        return 2
+
+    result = clean(root, keep=args.keep, days=args.days, dry_run=args.dry_run)
+    if not result.removed:
+        print(f"没有需要清理的报告，{len(result.kept)} 个报告全部保留")
+        return 0
+
+    verb = "可清理" if result.dry_run else "已清理"
+    print(
+        f"{verb} {len(result.removed)} 个报告，"
+        f"释放 {result.freed_bytes / 1024 / 1024:.1f} MB，"
+        f"保留 {len(result.kept)} 个"
+    )
+    for path in result.removed[:10]:
+        print(f"  - {path.name}")
+    if len(result.removed) > 10:
+        print(f"  …… 其余 {len(result.removed) - 10} 个")
+    if result.dry_run:
+        print("（dry-run：未实际删除，去掉 --dry-run 执行）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -193,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         return _run(args)
+    if args.command == "clean":
+        return _clean(args)
 
     parser.print_help()
     return 2

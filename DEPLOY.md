@@ -237,7 +237,51 @@ python -m agentpulse run \
 | `--out` | 报告输出根目录，默认 `./reports` |
 | `--list-subfields` | 列出该门类的二级、三级学科与热点主题 |
 
-### 4.5 主要接口
+### 4.5 清理历史报告
+
+每轮任务会在 `reports/` 下生成一个目录（`plan/candidates/analyses/synthesis/critique/events/report`），跑多了会占用磁盘。用 `clean` 子命令按数量或天数清理：
+
+```bash
+# 预演：只统计，不删除
+python -m agentpulse clean --dry-run
+
+# 只保留最近 20 轮（默认值）
+python -m agentpulse clean
+
+# 只保留最近 5 轮
+python -m agentpulse clean --keep 5
+
+# 额外删除超过 30 天的报告（即使还在最近 5 轮内）
+python -m agentpulse clean --keep 5 --days 30
+
+# 清空全部报告
+python -m agentpulse clean --keep 0
+
+# 自定义报告目录
+python -m agentpulse clean --out D:\reports --keep 10
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--out` | 报告根目录，默认 `./reports` |
+| `--keep` | 保留最近 N 轮，默认 20，`0` 表示全删 |
+| `--days` | 额外删除超过 N 天的报告 |
+| `--dry-run` | 只统计不删除 |
+
+安全约束：只删除 `reports/` 下符合任务产物特征的子目录（含 `report.md` / `report.html` / `candidates.json`），不会触碰根目录本身或用户自己放的其它目录。
+
+页面右上角「清理记录」按钮等价于 `clean --keep 20`：二次确认后删除更早的历史报告，结果显示在「运行日志」中。执行中的任务目录会被自动跳过。
+
+清理机制：
+
+- **识别范围**：只扫描报告根目录下的一级子目录，且目录内必须含 `report.md` / `report.html` / `candidates.json` 之一，才算一轮任务产物
+- **排序**：按目录修改时间从新到旧，最新的在前
+- **保留规则**：前 `keep` 轮保留；给了 `days` 时，即使在前 `keep` 轮内，超过该天数的也删除
+- **执行中的任务**：Web 端调用时会排除当前 `running` 状态任务的产物目录，避免删掉正在写入的报告
+- **入口**：命令行 `agentpulse clean`、页面「清理记录」按钮、接口 `POST /api/cleanup`，三者共用同一套逻辑
+- **可逆性**：删除为永久删除（不进回收站），建议先 `--dry-run` 或在低峰期执行
+
+### 4.6 主要接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -253,6 +297,7 @@ python -m agentpulse run \
 | GET/PUT | `/api/settings` | 读取 / 保存配置 |
 | POST | `/api/settings/test` | 测试 NCBI Key |
 | POST | `/api/settings/test-model` | 测试模型连通性 |
+| POST | `/api/cleanup` | 清理历史报告，body：`{"keep": 20, "days": null, "dry_run": false}` |
 
 ---
 
@@ -475,6 +520,7 @@ AgentPulse/
 | 页面显示规则模式 | 未配置 `CHAT_API_KEY`，或模型测试失败，属于预期降级 |
 | 中文乱码 | Windows 控制台设置 `PYTHONIOENCODING=utf-8` |
 | 内存持续增长 | 任务历史最多保留 12 条，重启服务可释放；确认没有多 worker |
+| 磁盘被报告占满 | `python -m agentpulse clean --keep 20`，先加 `--dry-run` 预演 |
 
 ---
 

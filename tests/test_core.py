@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agentpulse import qa, settings_store
+from agentpulse import cleanup, qa, settings_store
 from agentpulse.agents.critic import CriticAgent
 from agentpulse.agents.planner import PlannerAgent
 from agentpulse.agents.synthesizer import heuristic_synthesis
@@ -959,6 +959,62 @@ class QaTest(unittest.IsolatedAsyncioTestCase):
                 result = await qa.answer("论文问答的引用如何保证", run_dir, settings)
         self.assertEqual(result["mode"], "llm")
         self.assertEqual(result["citations"][0]["uid"], "arxiv:1")
+
+
+class CleanupTest(unittest.TestCase):
+    def _root(self, tmp: Path, count: int = 5) -> Path:
+        root = tmp / "reports"
+        root.mkdir()
+        for index in range(count):
+            run_dir = root / f"2026010{index}-000000-topic"
+            run_dir.mkdir()
+            (run_dir / "report.md").write_text("x" * 1024, encoding="utf-8")
+            stamp = 1_700_000_000 + index * 3600
+            os.utime(run_dir, (stamp, stamp))
+        (root / "notes").mkdir()  # 非报告目录不应被清理
+        return root
+
+    def test_plan_keeps_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(Path(tmp))
+            remove, kept = cleanup.plan(root, keep=2)
+        self.assertEqual(len(remove), 3)
+        self.assertEqual([path.name for path in kept], [
+            "20260104-000000-topic",
+            "20260103-000000-topic",
+        ])
+
+    def test_clean_dry_run_keeps_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(Path(tmp))
+            result = cleanup.clean(root, keep=2, dry_run=True)
+            self.assertEqual(len(result.removed), 3)
+            self.assertTrue(result.freed_bytes > 0)
+            self.assertEqual(len(list(root.iterdir())), 6)
+
+    def test_clean_removes_old_and_keeps_non_report_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(Path(tmp))
+            result = cleanup.clean(root, keep=2)
+            self.assertEqual(len(result.removed), 3)
+            self.assertTrue(all(not path.exists() for path in result.removed))
+            self.assertTrue((root / "notes").is_dir())
+            self.assertTrue((root / "20260104-000000-topic" / "report.md").exists())
+
+    def test_days_option_removes_expired_even_if_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(Path(tmp), count=2)
+            remove, kept = cleanup.plan(root, keep=5, days=1, now=1_700_000_000 + 20 * 86400)
+        self.assertEqual(len(remove), 2)
+        self.assertEqual(kept, [])
+
+    def test_exclude_protects_active_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(Path(tmp), count=3)
+            active = root / "20260102-000000-topic"
+            remove, kept = cleanup.plan(root, keep=0, exclude={active})
+        self.assertEqual(kept, [active])
+        self.assertEqual(len(remove), 2)
 
 
 if __name__ == "__main__":

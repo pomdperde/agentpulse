@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agentpulse import qa, settings_store
+from agentpulse import cleanup, qa, settings_store
 from agentpulse.http import HttpClient, HttpError
 from agentpulse.llm import LLMClient
 from agentpulse.orchestrator import ALL_SOURCES, Pipeline
@@ -53,6 +53,12 @@ class RunRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=300)
+
+
+class CleanupRequest(BaseModel):
+    keep: int = Field(default=20, ge=0, le=5000)
+    days: int | None = Field(default=None, ge=1, le=3650)
+    dry_run: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -259,6 +265,37 @@ async def ask_run(run_id: str, request: AskRequest) -> JSONResponse:
         request.question, state.run_dir, settings_store.effective_settings()
     )
     return JSONResponse(result)
+
+
+@app.post("/api/cleanup")
+async def cleanup_reports(request: CleanupRequest) -> JSONResponse:
+    active: set[Path] = set()
+    for state in runs.values():
+        if state.status != "running":
+            continue
+        if state.run_dir:
+            active.add(state.run_dir)
+        for event in state.events:
+            value = event.get("run_dir")
+            if value:
+                active.add(Path(value))
+
+    result = cleanup.clean(
+        REPORT_ROOT,
+        keep=request.keep,
+        days=request.days,
+        dry_run=request.dry_run,
+        exclude=active,
+    )
+    return JSONResponse(
+        {
+            "removed": len(result.removed),
+            "kept": len(result.kept),
+            "freed_mb": round(result.freed_bytes / 1024 / 1024, 1),
+            "names": [path.name for path in result.removed[:10]],
+            "dry_run": result.dry_run,
+        }
+    )
 
 
 @app.get("/api/subfields")

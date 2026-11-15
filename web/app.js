@@ -379,4 +379,34 @@ async function askQuestion(event) {
 
 qaForm.addEventListener("submit", askQuestion);
 
+const cleanupBtn = $("#cleanup-btn");
+cleanupBtn.addEventListener("click", async () => {
+  if (!confirm("清理本地查询记录？\n将保留最近 20 轮报告，删除更早的历史报告。")) return;
+  const label = cleanupBtn.textContent;
+  cleanupBtn.disabled = true;
+  cleanupBtn.textContent = "清理中…";
+  try {
+    const resp = await fetch("/api/cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep: 20 }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    if (!data.removed) {
+      appendLog(`本地记录已是最近 ${data.kept} 轮，无需清理`, "ok");
+    } else {
+      appendLog(
+        `已清理 ${data.removed} 个历史报告，释放 ${data.freed_mb} MB，保留最近 ${data.kept} 轮`,
+        "ok"
+      );
+    }
+  } catch (err) {
+    appendLog(`清理失败：${err.message}`, "er");
+  } finally {
+    cleanupBtn.disabled = false;
+    cleanupBtn.textContent = label;
+  }
+});
+
 checkHealth();
