@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentPulse · 多智能体论文雷达</title>
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>AgentPulse</h1>
+      <p>多智能体 · Agent 热点检索与论文汇总</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button id="settings-btn" class="ghost" type="button">配置</button>
+    <div class="health" id="health">检查服务中…</div>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="panel form-panel">
+    <h2>检索配置</h2>
+    <div class="field">
+      <span>学科门类</span>
+      <select id="field">
+        <option value="">全部门类</option>
+        <option value="计算机科学">计算机科学</option>
+        <option value="工程学">工程学</option>
+        <option value="材料科学">材料科学</option>
+        <option value="数学">数学</option>
+        <option value="物理与天文学">物理与天文学</option>
+        <option value="化学">化学</option>
+        <option value="医学">医学</option>
+        <option value="生物科学">生物科学</option>
+        <option value="经济与商业">经济与商业</option>
+        <option value="社会科学与心理学">社会科学与心理学</option>
+        <option value="地球与环境科学">地球与环境科学</option>
+        <option value="人文与艺术">人文与艺术</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="field">
+        <span>二级学科</span>
+        <select id="subfield" disabled>
+          <option value="">全部二级学科</option>
+        </select>
+      </div>
+      <div class="field">
+        <span>三级学科</span>
+        <select id="subfield3" disabled>
+          <option value="">全部三级学科</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <span>研究主题 <em class="tag">1–5 个，按顺序依次检索</em></span>
+      <div class="topic-list">
+        <label class="topic-item">
+          <b>1</b>
+          <input id="topic1" type="text" maxlength="80" value="LLM agent" placeholder="主题 1（必填）" autocomplete="off">
+        </label>
+        <label class="topic-item">
+          <b>2</b>
+          <input id="topic2" type="text" maxlength="80" placeholder="主题 2（可选）" autocomplete="off">
+        </label>
+        <label class="topic-item">
+          <b>3</b>
+          <input id="topic3" type="text" maxlength="80" placeholder="主题 3（可选）" autocomplete="off">
+        </label>
+        <label class="topic-item">
+          <b>4</b>
+          <input id="topic4" type="text" maxlength="80" placeholder="主题 4（可选）" autocomplete="off">
+        </label>
+        <label class="topic-item">
+          <b>5</b>
+          <input id="topic5" type="text" maxlength="80" placeholder="主题 5（可选）" autocomplete="off">
+        </label>
+      </div>
+      <small class="hint">按从上到下的优先级依次检索，前面的主题凑满精选篇数后不再检索后续主题；回车即可提交</small>
+    </div>
+
+    <label class="field">
+      <span>期刊 / 会议（可选）</span>
+      <input id="venue" type="text" maxlength="80" placeholder="如 Nature、CVPR、Journal of Finance，留空则不限" autocomplete="off">
+      <small class="hint">支持缩写与全称互认（如 CVPR / NeurIPS）；指定后会自动直接抓取该会议在 OpenAlex 的来源库</small>
+    </label>
+
+    <div class="field">
+      <span>推荐主题 <em class="tag" id="topic-scope">全部门类</em></span>
+      <div class="chips" id="field-topics"></div>
+      <small class="hint">选定门类或二级学科后自动切换到该范围首个热点主题，仍可手动输入</small>
+    </div>
+
+    <div class="row">
+      <label class="field">
+        <span>回溯窗口</span>
+        <select id="days">
+          <option value="7">7 天</option>
+          <option value="14">14 天</option>
+          <option value="30" selected>30 天</option>
+          <option value="90">90 天</option>
+          <option value="180">180 天</option>
+          <option value="365">1 年</option>
+          <option value="730">2 年</option>
+          <option value="1095">3 年</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>精选篇数</span>
+        <select id="max-papers">
+          <option value="12">12</option>
+          <option value="20" selected>20</option>
+          <option value="40">40</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="field">
+      <span>数据源</span>
+      <div class="checks">
+        <label><input type="checkbox" value="arxiv" checked> arXiv</label>
+        <label><input type="checkbox" value="openreview"> OpenReview</label>
+        <label><input type="checkbox" value="openalex"> OpenAlex</label>
+        <label><input type="checkbox" value="crossref"> Crossref</label>
+        <label><input type="checkbox" value="doaj"> DOAJ</label>
+        <label><input type="checkbox" value="europepmc"> Europe PMC</label>
+        <label><input type="checkbox" value="pubmed"> PubMed</label>
+        <label><input type="checkbox" value="biorxiv"> bioRxiv / medRxiv</label>
+        <label><input type="checkbox" value="hal"> HAL</label>
+        <label><input type="checkbox" value="zenodo"> Zenodo</label>
+        <label><input type="checkbox" value="semantic_scholar"> Semantic Scholar</label>
+        <label><input type="checkbox" value="hackernews"> Hacker News</label>
+      </div>
+      <small class="hint">选择学科门类后会自动勾选该门类推荐的开放数据源</small>
+    </div>
+
+    <label class="switch">
+      <input id="ieee" type="checkbox">
+      <span>只看 IEEE 出版物（DOI 10.1109，元数据取自 OpenAlex / Crossref）</span>
+    </label>
+    <label class="switch">
+      <input id="no-llm" type="checkbox">
+      <span>强制规则模式（不调用模型）</span>
+    </label>
+
+    <button id="run-btn" class="primary">开始检索</button>
+    <p class="hint form-foot">未配置 CHAT_API_KEY 时会自动走规则路径，报告质量略降但链路完整。</p>
+  </section>
+
+  <section class="panel pipeline-panel">
+    <h2>Agent 流水线</h2>
+    <div class="agents" id="agents">
+      <div class="agent" data-agent="planner">
+        <span class="dot"></span><div><b>Planner</b><small>主题拆解与检索式生成</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="search">
+        <span class="dot"></span><div><b>Search</b><small>多源并发召回</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="curator">
+        <span class="dot"></span><div><b>Curator</b><small>去重、打分、截断</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="analyst">
+        <span class="dot"></span><div><b>Analyst</b><small>逐篇结构化精读</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="synthesizer">
+        <span class="dot"></span><div><b>Synthesizer</b><small>主题聚类与趋势</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="critic">
+        <span class="dot"></span><div><b>Critic</b><small>引用与覆盖率校验</small><em>待命</em></div>
+      </div>
+      <div class="agent" data-agent="writer">
+        <span class="dot"></span><div><b>Writer</b><small>Markdown / HTML 报告</small><em>待命</em></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<section class="panel log-panel">
+  <div class="log-head"><h2>运行日志</h2><button id="clear-log" class="ghost">清空</button></div>
+  <pre id="log" class="log">等待任务…</pre>
+</section>
+
+<section class="panel result-panel hidden" id="result-panel">
+  <div class="result-head">
+    <h2>汇总报告</h2>
+    <div class="actions">
+      <a id="open-report" class="primary link" href="#" target="_blank" rel="noopener">新窗口打开</a>
+      <button id="close-report" class="ghost">收起</button>
+    </div>
+  </div>
+  <iframe id="report-frame" title="论文汇总报告"></iframe>
+
+  <div class="qa-block">
+    <div class="qa-head">
+      <h3>论文问答</h3>
+      <span class="hint" id="qa-mode">基于本次检索的论文、精读结论与主题归纳作答</span>
+    </div>
+    <div class="qa-log" id="qa-log"></div>
+    <form class="qa-form" id="qa-form">
+      <input id="qa-input" type="text" maxlength="300" placeholder="就本次检索的论文提问，例如：这些论文的方法有哪些主要差异？" autocomplete="off">
+      <button class="primary" id="qa-submit" type="submit">提问</button>
+    </form>
+  </div>
+</section>
+
+<div class="drawer-mask hidden" id="settings-mask"></div>
+<aside class="drawer hidden" id="settings-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <h2>系统配置</h2>
+      <p>密钥仅保存在本机，不会随报告导出</p>
+    </div>
+    <button id="settings-close" class="ghost" type="button">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <h3 class="drawer-sub">模型 API</h3>
+
+    <label class="field">
+      <span>模型 API Key <em id="settings-chat-source" class="tag">未配置</em></span>
+      <div class="key-row">
+        <input id="settings-chat-key" type="password" placeholder="粘贴模型 API Key" autocomplete="off">
+        <button id="settings-chat-eye" class="ghost" type="button">显示</button>
+      </div>
+      <small id="settings-chat-hint" class="hint">未配置时自动走规则模式</small>
+    </label>
+
+    <div class="row">
+      <label class="field">
+        <span>接口地址</span>
+        <input id="settings-chat-base" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>模型名</span>
+        <input id="settings-chat-model" type="text" placeholder="deepseek-v4-flash" autocomplete="off">
+      </label>
+    </div>
+
+    <div class="drawer-test">
+      <button id="settings-chat-test" class="ghost" type="button">测试模型连接</button>
+      <span class="hint">OpenAI 兼容接口，保存后下一轮任务生效</span>
+    </div>
+
+    <h3 class="drawer-sub">论文数据源</h3>
+
+    <div class="lock-banner hidden" id="settings-lock-banner">
+      <b>NCBI_API_KEY 由环境变量提供</b>
+      <span>本页对密钥只读；修改需调整部署环境并重启服务</span>
+    </div>
+
+    <label class="field">
+      <span>NCBI API Key <em id="settings-key-source" class="tag">未配置</em></span>
+      <div class="key-row">
+        <input id="settings-key" type="password" placeholder="粘贴 NCBI API Key" autocomplete="off">
+        <button id="settings-eye" class="ghost" type="button">显示</button>
+      </div>
+      <small id="settings-key-hint" class="hint">未配置 3 请求/秒 · 配置后 10 请求/秒</small>
+    </label>
+
+    <label class="field">
+      <span>联系邮箱</span>
+      <input id="settings-email" type="email" placeholder="选填，用于 OpenAlex / Crossref / NCBI 礼貌池">
+    </label>
+
+    <div class="drawer-actions">
+      <button id="settings-test" class="ghost" type="button">测试连接</button>
+      <button id="settings-save" class="primary drawer-save" type="button" disabled>保存</button>
+    </div>
+    <p id="settings-toast" class="hint" aria-live="polite"></p>
+    <p class="hint">优先级：环境变量 &gt; data/settings.json &gt; .env。密钥不回显明文，不写入日志与报告。</p>
+  </div>
+</aside>
+
+<script src="/assets/app.js"></script>
+<script src="/assets/settings.js"></script>
+</body>
+</html>
