@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agentpulse.agents.base import Agent
-from agentpulse.models import Analysis, Critique, Paper, Synthesis
+from agentpulse.pipeline.agents.base import Agent
+from agentpulse.core.models import Analysis, Critique, Paper, Synthesis
 
 _SYSTEM = """你是论文综述的质量评审。
 给定研究主题、精选论文、逐篇分析与已归纳的主题，请评估：

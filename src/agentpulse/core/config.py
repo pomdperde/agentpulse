@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     llm_timeout: float = 120.0
     http_retries: int = 3
 
+    # 持久化
+    db_path: str = "data/agentpulse.db"
+    max_history: int = 500
+
+    # 鉴权
+    auth_secret: str = ""
+    token_expire_days: int = 7
+
     @property
     def llm_enabled(self) -> bool:
         """没有 key 就直接走规则降级路径，不抛异常。"""

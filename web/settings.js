@@ -39,11 +39,22 @@
 
   async function api(method, url, body) {
     var options = { method: method };
+    var headers = {};
     if (body) {
-      options.headers = { "Content-Type": "application/json" };
+      headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
     }
+    var token = localStorage.getItem("agentpulse_token");
+    if (token) headers["Authorization"] = "Bearer " + token;
+    if (Object.keys(headers).length) options.headers = headers;
     var resp = await fetch(url, options);
+    if (resp.status === 401) {
+      localStorage.removeItem("agentpulse_token");
+      localStorage.removeItem("agentpulse_user");
+      document.getElementById("app").classList.add("hidden");
+      document.getElementById("login-overlay").classList.remove("hidden");
+      throw new Error("登录已过期，请重新登录");
+    }
     var data = null;
     try {
       data = await resp.json();

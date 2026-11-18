@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentpulse.models import Analysis, Critique, Paper, Plan, RunMeta, Synthesis
+from agentpulse.core.models import Analysis, Critique, Paper, Plan, RunMeta, Synthesis
 
 
 def _cell(text: str) -> str:

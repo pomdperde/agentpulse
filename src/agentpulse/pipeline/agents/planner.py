@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 
-from agentpulse.agents.base import Agent
-from agentpulse.models import Plan
-from agentpulse.taxonomy import hotspot_terms
+from agentpulse.pipeline.agents.base import Agent
+from agentpulse.core.models import Plan
+from agentpulse.core.taxonomy import hotspot_terms
 
 _SYSTEM = """你是论文检索规划专家。给定一个研究主题（可能是中文），产出结构化的检索计划。
 要求：

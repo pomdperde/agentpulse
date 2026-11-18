@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentpulse.config import Settings
-from agentpulse.llm import LLMClient
+from agentpulse.core.config import Settings
+from agentpulse.infra.llm import LLMClient
 
 _ASCII = re.compile(r"[a-z0-9][a-z0-9.\-+#]*")
 _CJK = re.compile(r"[\u4e00-\u9fff]+")

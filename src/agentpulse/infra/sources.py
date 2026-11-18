@@ -7,10 +7,10 @@ import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
-from agentpulse.config import Settings
-from agentpulse.http import HttpClient, HttpError
-from agentpulse.models import Paper
-from agentpulse.venues import pick_source, venue_from_comment, venue_patterns
+from agentpulse.core.config import Settings
+from agentpulse.infra.http import HttpClient, HttpError
+from agentpulse.core.models import Paper
+from agentpulse.core.venues import pick_source, venue_from_comment, venue_patterns
 
 ARXIV_API = "https://export.arxiv.org/api/query"
 S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -868,10 +868,16 @@ async def fetch_all(
     cutoff = date.today() - timedelta(days=days)
     limit = settings.per_source_limit
     errors: list[str] = []
-    # 限制并发，避免多个大响应同时驻留内存
-    semaphore = asyncio.Semaphore(4)
+    # 并发数跟随配置：太高会同时驻留多个大响应，太低则大量空等网络
+    concurrency = max(1, min(12, settings.max_concurrency))
+    semaphore = asyncio.Semaphore(concurrency)
+    # Semantic Scholar 免费额度约 1 rps，用独立闸门串行，避免占着抓取槽位睡觉
+    s2_gate = asyncio.Lock()
 
     async def run_one(source: str, query: str) -> list[Paper]:
+        if source == "semantic_scholar":
+            async with s2_gate:
+                await asyncio.sleep(1.1)
         async with semaphore:
             try:
                 if source == "arxiv":
@@ -894,8 +900,6 @@ async def fetch_all(
                         settings.ncbi_api_key, settings.contact_email,
                     )
                 if source == "semantic_scholar":
-                    # 免费额度约 1 rps，任务间串行一点更稳
-                    await asyncio.sleep(1.1)
                     return await search_semantic_scholar(
                         http, query, limit, cutoff, settings.semantic_scholar_api_key
                     )
@@ -913,6 +917,7 @@ async def fetch_all(
                 errors.append(f"{source}:{query} -> {type(exc).__name__}: {exc}")
             return []
 
+    jobs = list(dict.fromkeys(jobs))
     batches = await asyncio.gather(*(run_one(s, q) for s, q in jobs))
     papers = [paper for batch in batches for paper in batch]
     return papers, errors

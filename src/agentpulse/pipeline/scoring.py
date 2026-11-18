@@ -4,8 +4,8 @@ import math
 import re
 from datetime import date
 
-from agentpulse.metrics import VenueMetric, quality_for
-from agentpulse.models import Paper
+from agentpulse.infra.metrics import VenueMetric, quality_for
+from agentpulse.core.models import Paper
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]")
 

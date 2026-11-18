@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid meet" role="img" aria-label="AgentPulse 系统架构框图">
+  <title>AgentPulse 系统架构</title>
+  <style>
+    :root {
+      --bg: #FFFFFF;
+      --surface: #F7F7F8;
+      --surface-muted: #EFEFF2;
+      --text: #171717;
+      --text-muted: #52525B;
+      --border: rgba(23, 23, 23, 0.14);
+      --brand: #0FDC78;
+      --brand-soft: #E5FFF2;
+      --brand-text: #004D26;
+      --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171717;
+        --surface: #1F1F22;
+        --surface-muted: #262626;
+        --text: #E5E5E5;
+        --text-muted: #A1A1AA;
+        --border: rgba(229, 229, 229, 0.16);
+        --brand: #32F08C;
+        --brand-soft: #004D26;
+        --brand-text: #E5FFF2;
+      }
+    }
+    .bg { fill: var(--bg); }
+    svg { background: var(--bg); }
+    .th { fill: var(--text); font-family: var(--font-sans); font-size: 14px; font-weight: 500; }
+    .step-title { fill: var(--text); font-family: var(--font-sans); font-size: 15px; font-weight: 600; }
+    .ts { fill: var(--text-muted); font-family: var(--font-sans); font-size: 12px; }
+    .num { fill: var(--text-muted); font-family: var(--font-sans); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; }
+    .hero { fill: var(--text); font-family: var(--font-sans); font-size: 24px; font-weight: 600; }
+    .lede { fill: var(--text-muted); font-family: var(--font-sans); font-size: 13px; }
+    .node { fill: var(--surface-muted); stroke: var(--border); stroke-width: 1; }
+    .brand-node { fill: var(--brand-soft); stroke: var(--brand); stroke-width: 1.5; }
+    .brand-node .th, .brand-node .ts { fill: var(--brand-text); }
+    .boundary { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 6 5; }
+    .arr { fill: none; stroke: var(--text-muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    .dep { fill: none; stroke: var(--text-muted); stroke-width: 1.2; stroke-dasharray: 5 5; stroke-linecap: round; }
+    .cap { fill: var(--surface); stroke: var(--border); stroke-width: 1; }
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="var(--text-muted)"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1400" height="900"/>
+
+  <text class="hero" x="48" y="62">AgentPulse 系统架构</text>
+  <text class="lede" x="48" y="90">多 Agent 论文检索与汇总 · FastAPI 单进程 · 12 个公开数据源 · SSE 实时进度</text>
+
+  <path class="arr" d="M760 58 L784 58"/>
+  <text class="ts" x="792" y="62">数据流</text>
+  <path class="dep" d="M880 58 L904 58"/>
+  <text class="ts" x="912" y="62">依赖调用</text>
+  <rect class="brand-node" x="1020" y="48" width="14" height="14" rx="3"/>
+  <text class="ts" x="1042" y="62">核心编排</text>
+
+  <rect class="boundary" x="60" y="112" width="202" height="168" rx="12"/>
+  <text class="ts" x="76" y="134">入口</text>
+  <rect class="node" x="76" y="146" width="170" height="58" rx="8"/>
+  <text class="th" x="161" y="170" text-anchor="middle">Web 面板</text>
+  <text class="ts" x="161" y="190" text-anchor="middle">HTML + SSE</text>
+  <rect class="node" x="76" y="214" width="170" height="54" rx="8"/>
+  <text class="th" x="161" y="238" text-anchor="middle">命令行</text>
+  <text class="ts" x="161" y="258" text-anchor="middle">run / clean / serve</text>
+
+  <rect class="node" x="330" y="140" width="350" height="120" rx="8"/>
+  <text class="th" x="350" y="170">FastAPI 接口层</text>
+  <text class="ts" x="350" y="196">/api/runs · /api/settings</text>
+  <text class="ts" x="350" y="216">SSE：/api/runs/{id}/events</text>
+  <text class="ts" x="350" y="236">asyncio 单进程 · 任务登记</text>
+
+  <rect class="brand-node" x="710" y="140" width="350" height="120" rx="8"/>
+  <text class="th" x="730" y="170">编排器 Pipeline</text>
+  <text class="ts" x="730" y="196">唯一状态 · 事件 trace</text>
+  <text class="ts" x="730" y="216">主题串行 · 并发抓取</text>
+  <text class="ts" x="730" y="236">阶段落盘 · 失败降级</text>
+
+  <rect class="node" x="1090" y="140" width="250" height="120" rx="8"/>
+  <text class="th" x="1110" y="170">配置中心</text>
+  <text class="ts" x="1110" y="196">模型 API · 密钥 · 邮箱</text>
+  <text class="ts" x="1110" y="216">env &gt; settings.json &gt; .env</text>
+  <text class="ts" x="1110" y="236">settings_store 统一读写</text>
+
+  <path class="arr" d="M246 166 L330 166" marker-end="url(#arrow)"/>
+  <path class="dep" d="M330 202 L246 202" marker-end="url(#arrow)"/>
+  <rect class="cap" x="252" y="176" width="72" height="18" rx="9"/>
+  <text class="ts" x="288" y="189" text-anchor="middle">HTTP · SSE</text>
+
+  <path class="arr" d="M680 200 L710 200" marker-end="url(#arrow)"/>
+  <path class="arr" d="M1090 200 L1060 200" marker-end="url(#arrow)"/>
+  <path class="arr" d="M885 260 L885 316" marker-end="url(#arrow)"/>
+  <rect class="cap" x="895" y="278" width="40" height="18" rx="9"/>
+  <text class="ts" x="915" y="291" text-anchor="middle">调度</text>
+
+  <rect class="boundary" x="60" y="320" width="1280" height="188" rx="12"/>
+  <text class="ts" x="76" y="346">Agent 流水线 · 编号即执行顺序</text>
+
+  <rect class="node" x="80" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="96" y="390">01</text>
+  <text class="step-title" x="96" y="416">规划</text>
+  <text class="ts" x="96" y="436">Planner</text>
+  <text class="ts" x="96" y="456">子主题 · 检索式</text>
+
+  <rect class="node" x="262" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="278" y="390">02</text>
+  <text class="step-title" x="278" y="416">检索</text>
+  <text class="ts" x="278" y="436">Search</text>
+  <text class="ts" x="278" y="456">12 源并发</text>
+
+  <rect class="node" x="444" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="460" y="390">03</text>
+  <text class="step-title" x="460" y="416">去重打分</text>
+  <text class="ts" x="460" y="436">Curator</text>
+  <text class="ts" x="460" y="456">影响因子 · 分区</text>
+
+  <rect class="node" x="626" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="642" y="390">04</text>
+  <text class="step-title" x="642" y="416">逐篇精读</text>
+  <text class="ts" x="642" y="436">Analyst</text>
+  <text class="ts" x="642" y="456">问题·方法·贡献</text>
+
+  <rect class="node" x="808" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="824" y="390">05</text>
+  <text class="step-title" x="824" y="416">归纳</text>
+  <text class="ts" x="824" y="436">Synthesizer</text>
+  <text class="ts" x="824" y="456">趋势·研究空白</text>
+
+  <rect class="node" x="990" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="1006" y="390">06</text>
+  <text class="step-title" x="1006" y="416">评审</text>
+  <text class="ts" x="1006" y="436">Critic</text>
+  <text class="ts" x="1006" y="456">评分·硬性拦截</text>
+
+  <rect class="node" x="1172" y="364" width="148" height="112" rx="8"/>
+  <text class="num" x="1188" y="390">07</text>
+  <text class="step-title" x="1188" y="416">输出报告</text>
+  <text class="ts" x="1188" y="436">Writer</text>
+  <text class="ts" x="1188" y="456">Markdown + HTML</text>
+
+  <path class="arr" d="M228 420 L262 420" marker-end="url(#arrow)"/>
+  <path class="arr" d="M410 420 L444 420" marker-end="url(#arrow)"/>
+  <path class="arr" d="M592 420 L626 420" marker-end="url(#arrow)"/>
+  <path class="arr" d="M774 420 L808 420" marker-end="url(#arrow)"/>
+  <path class="arr" d="M956 420 L990 420" marker-end="url(#arrow)"/>
+  <path class="arr" d="M1138 420 L1172 420" marker-end="url(#arrow)"/>
+
+  <text class="ts" x="76" y="496">并发点：02 检索（12 源 · 4 并发） · 04 精读（6 篇/批）　　降级：无模型时逐级回退到规则模式</text>
+
+  <rect class="boundary" x="60" y="548" width="1280" height="180" rx="12"/>
+  <text class="ts" x="1324" y="574" text-anchor="end">依赖与产物 · 按阶段调用</text>
+
+  <rect class="node" x="76" y="588" width="370" height="110" rx="8"/>
+  <text class="th" x="96" y="616">12 个公开论文源</text>
+  <text class="ts" x="96" y="640">arXiv · OpenReview · OpenAlex · Crossref</text>
+  <text class="ts" x="96" y="660">PubMed · Europe PMC · Semantic Scholar</text>
+  <text class="ts" x="96" y="680">DOAJ · bioRxiv · HAL · Zenodo · HN</text>
+
+  <rect class="node" x="466" y="588" width="240" height="110" rx="8"/>
+  <text class="th" x="486" y="616">LLM（可选）</text>
+  <text class="ts" x="486" y="640">OpenAI 兼容接口</text>
+  <text class="ts" x="486" y="660">未配置 → 规则模式</text>
+
+  <rect class="node" x="726" y="588" width="240" height="110" rx="8"/>
+  <text class="th" x="746" y="616">领域知识</text>
+  <text class="ts" x="746" y="640">会议别名 · IF 分区</text>
+  <text class="ts" x="746" y="660">学科 12 / 87 / 199</text>
+
+  <rect class="node" x="986" y="588" width="338" height="110" rx="8"/>
+  <text class="th" x="1006" y="616">报告产物</text>
+  <text class="ts" x="1006" y="640">reports/&lt;run&gt;/ · plan · candidates</text>
+  <text class="ts" x="1006" y="660">analyses · synthesis · critique</text>
+  <text class="ts" x="1006" y="680">events.jsonl · report.md · report.html</text>
+
+  <path class="dep" d="M261 508 L261 584" marker-end="url(#arrow)"/>
+  <path class="dep" d="M586 508 L586 584" marker-end="url(#arrow)"/>
+  <path class="dep" d="M846 508 L846 584" marker-end="url(#arrow)"/>
+  <path class="arr" d="M1246 476 C 1246 528, 1155 536, 1155 584" marker-end="url(#arrow)"/>
+  <rect class="cap" x="1256" y="512" width="48" height="18" rx="9"/>
+  <text class="ts" x="1280" y="525" text-anchor="middle">落盘</text>
+
+  <rect class="node" x="76" y="756" width="560" height="90" rx="8"/>
+  <text class="th" x="96" y="784">运维与清理</text>
+  <text class="ts" x="96" y="808">agentpulse clean --keep 20 · 页面按钮 · POST /api/cleanup</text>
+  <text class="ts" x="96" y="828">只识别报告目录，跳过执行中任务，默认保留最近 20 轮</text>
+
+  <rect class="node" x="656" y="756" width="300" height="90" rx="8"/>
+  <text class="th" x="676" y="784">运行约束</text>
+  <text class="ts" x="676" y="808">单进程 · 历史 ≤ 12</text>
+  <text class="ts" x="676" y="828">指标缓存 6h · 并发 4</text>
+
+  <rect class="node" x="976" y="756" width="348" height="90" rx="8"/>
+  <text class="th" x="996" y="784">论文问答</text>
+  <text class="ts" x="996" y="808">qa.py · BM25 · 跨语言词表</text>
+  <text class="ts" x="996" y="828">基于本轮产物回答并附带引用</text>
+
+  <path class="arr" d="M1155 698 L1155 752" marker-end="url(#arrow)"/>
+  <rect class="cap" x="1165" y="714" width="40" height="18" rx="9"/>
+  <text class="ts" x="1185" y="727" text-anchor="middle">读取</text>
+</svg>

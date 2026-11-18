@@ -13,15 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentpulse.http import HttpClient
-from agentpulse.venues import pick_source
+from agentpulse.infra.http import HttpClient
+from agentpulse.core.venues import pick_source
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 OVERRIDE_PATH = ROOT / "data" / "journal_metrics.json"
 SOURCE_API = "https://api.openalex.org/sources"
+
+# 同一进程内缓存 OpenAlex 来源查询：多个主题、多轮任务常命中同一批期刊/会议
+_METRIC_CACHE: dict[str, tuple[float, dict]] = {}
+_CACHE_TTL = 6 * 3600
 
 # 代理值的绝对分档阈值：≥10 Q1，≥5 Q2，≥1.5 Q3，其余 Q4
 _IF_THRESHOLDS = ((10.0, "Q1"), (5.0, "Q2"), (1.5, "Q3"))
@@ -106,11 +111,17 @@ def _quality(metric: VenueMetric) -> float | None:
     return round(0.6 * normalized + 0.4 * quartile, 4)
 
 
+def clear_cache() -> None:
+    """清空进程内缓存，测试或手动刷新时使用。"""
+    _METRIC_CACHE.clear()
+
+
 async def fetch_venue_metrics(
     http: HttpClient,
     venues: list[str],
     mailto: str = "",
     overrides: dict[str, dict] | None = None,
+    concurrency: int = 4,
 ) -> dict[str, VenueMetric]:
     """并发查询每个来源的两年平均被引，返回以压低后的来源名为键的指标表。"""
     overrides = overrides or {}
@@ -129,6 +140,30 @@ async def fetch_venue_metrics(
             )
             metrics[venue.lower()] = metric
 
+    def _from_cache(venue: str) -> VenueMetric | None:
+        entry = _METRIC_CACHE.get(venue.lower())
+        if not entry or time.monotonic() - entry[0] > _CACHE_TTL:
+            return None
+        cached = entry[1]
+        return VenueMetric(
+            name=cached["name"],
+            impact_factor=float(cached["impact_factor"]),
+            works=int(cached["works"]),
+            origin="openalex",
+        )
+
+    pending: list[str] = []
+    for venue in unique:
+        if venue.lower() in metrics:
+            continue
+        cached = _from_cache(venue)
+        if cached is not None:
+            metrics[venue.lower()] = cached
+        else:
+            pending.append(venue)
+
+    semaphore = asyncio.Semaphore(max(1, min(6, concurrency)))
+
     async def _lookup(venue: str) -> None:
         params: dict[str, str | int] = {
             "search": venue,
@@ -137,22 +172,28 @@ async def fetch_venue_metrics(
         }
         if mailto:
             params["mailto"] = mailto
-        try:
-            data = await http.get_json(SOURCE_API, params=params)
-        except Exception:
-            return
+        async with semaphore:
+            try:
+                data = await http.get_json(SOURCE_API, params=params)
+            except Exception:
+                return
         picked = pick_source(data.get("results") or [], venue)
         if not picked:
             return
         stats = picked.get("summary_stats") or {}
+        payload = {
+            "name": str(picked.get("display_name") or venue),
+            "impact_factor": float(stats.get("2yr_mean_citedness") or 0.0),
+            "works": int(picked.get("works_count") or 0),
+        }
+        _METRIC_CACHE[venue.lower()] = (time.monotonic(), payload)
         metrics[venue.lower()] = VenueMetric(
-            name=str(picked.get("display_name") or venue),
-            impact_factor=float(stats.get("2yr_mean_citedness") or 0.0),
-            works=int(picked.get("works_count") or 0),
+            name=payload["name"],
+            impact_factor=payload["impact_factor"],
+            works=payload["works"],
             origin="openalex",
         )
 
-    pending = [v for v in unique if v.lower() not in metrics]
     if pending:
         await asyncio.gather(*(_lookup(venue) for venue in pending))
 

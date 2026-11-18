@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from collections import Counter
 
-from agentpulse.models import Analysis, Critique, Paper, Plan, RunMeta, Synthesis
+from agentpulse.core.models import Analysis, Critique, Paper, Plan, RunMeta, Synthesis
 
 _CSS = """
 :root{--bg:#0b1020;--panel:#131a2e;--line:#243052;--text:#e6ebff;--muted:#93a0c4;

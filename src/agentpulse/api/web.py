@@ -9,17 +9,21 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agentpulse import cleanup, qa, settings_store
-from agentpulse.http import HttpClient, HttpError
-from agentpulse.llm import LLMClient
-from agentpulse.orchestrator import ALL_SOURCES, Pipeline
-from agentpulse.sources import NCBI_ESEARCH
-from agentpulse.taxonomy import (
+from agentpulse.core import settings_store
+from agentpulse.infra import auth, db
+from agentpulse.pipeline import cleanup, qa
+from agentpulse.infra.http import HttpClient, HttpError
+from agentpulse.infra.llm import LLMClient
+from agentpulse.pipeline.orchestrator import ALL_SOURCES, Pipeline
+from agentpulse.infra.sources import NCBI_ESEARCH
+from agentpulse.core.taxonomy import (
     FIELDS,
     FIELD_SOURCES,
     TOPIC_PRESETS,
@@ -31,7 +35,7 @@ from agentpulse.taxonomy import (
     subfields_of,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 WEB_DIR = ROOT / "web"
 REPORT_ROOT = ROOT / "reports"
 
@@ -69,6 +73,22 @@ class SettingsUpdate(BaseModel):
     contact_email: str | None = None
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=64, pattern=r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$")
+    password: str = Field(min_length=6, max_length=128)
+    role: str = Field(default="user", pattern=r"^(admin|user)$")
+
+
+class UpdateUserRequest(BaseModel):
+    role: str | None = Field(default=None, pattern=r"^(admin|user)$")
+    password: str | None = Field(default=None, min_length=6, max_length=128)
+
+
 _KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _API_KEY_RE = re.compile(r"^\S{8,200}$")
 _BASE_URL_RE = re.compile(r"^https?://[^\s]{4,200}$")
@@ -81,21 +101,61 @@ _test_hits: dict[str, list[float]] = {}
 class RunState:
     id: str
     topic: str
+    user_id: int | None = None
     status: str = "queued"
     events: list[dict] = field(default_factory=list)
     signal: asyncio.Event = field(default_factory=asyncio.Event)
     run_dir: Path | None = None
     error: str | None = None
     task: asyncio.Task | None = None
+    _seq: int = 0
+    _pending_writes: list[asyncio.Task] = field(default_factory=list)
 
     def push(self, record: dict) -> None:
         self.events.append(record)
         self.signal.set()
+        # 异步落库：seq 已在入队前确定，读取时按 seq 排序保证顺序
+        self._seq += 1
+        t = asyncio.create_task(db.append_event(self.id, self._seq, record))
+        self._pending_writes.append(t)
+
+    async def flush_writes(self) -> None:
+        """等待所有待落库的事件写入完成。"""
+        pending = [t for t in self._pending_writes if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._pending_writes.clear()
 
 
 runs: dict[str, RunState] = {}
 MAX_RUNS = 12
-app = FastAPI(title="AgentPulse", version="0.2.0")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时初始化数据库并清理超限历史
+    settings = settings_store.effective_settings()
+    db_path = ROOT / settings.db_path
+    db.init_db(db_path)
+    # 首次启动创建默认管理员
+    await db.ensure_default_admin()
+    # 启动时把还在 running/queued 的任务标记为 failed（进程重启后无法恢复执行）
+    await _mark_stale_runs_failed()
+    yield
+    db.close_db()
+
+
+async def _mark_stale_runs_failed() -> None:
+    """重启后，DB 里 queued/running 的任务实际已中断，标记为 failed。"""
+    recent = await db.list_runs(limit=50)
+    for row in recent:
+        if row["status"] in {"queued", "running"}:
+            await db.update_run_status(
+                row["id"], "failed", error="服务重启，任务中断"
+            )
+
+
+app = FastAPI(title="AgentPulse", version="0.2.0", lifespan=lifespan)
 
 
 def _trim_runs() -> None:
@@ -116,6 +176,7 @@ def _trim_runs() -> None:
 
 async def _execute(state: RunState, request: RunRequest) -> None:
     state.status = "running"
+    await db.update_run_status(state.id, "running")
     try:
         settings = settings_store.effective_settings()
         days = request.days or settings.default_days
@@ -144,20 +205,62 @@ async def _execute(state: RunState, request: RunRequest) -> None:
         )
         state.status = "done"
         state.push({"event": "run.complete", "status": "done", "run_dir": str(state.run_dir)})
+        # 从事件流提取统计信息落库
+        fetched, kept, llm_used = _extract_stats(state.events)
+        await db.update_run_status(
+            state.id, "done", run_dir=str(state.run_dir), finished=True,
+            fetched=fetched, kept=kept, llm_used=llm_used,
+        )
     except Exception as exc:
         state.status = "failed"
         state.error = f"{type(exc).__name__}: {exc}"
         state.push({"event": "run.failed", "status": "failed", "error": state.error})
+        await db.update_run_status(state.id, "failed", error=state.error, finished=True)
     finally:
         state.push({"event": "stream.end"})
         state.signal.set()
+        await state.flush_writes()
         state.task = None
         _trim_runs()
         gc.collect()
 
 
+def _extract_stats(events: list[dict]) -> tuple[int, int, bool]:
+    """从事件流中提取 fetched / kept / llm_used 统计。"""
+    fetched = 0
+    kept = 0
+    llm_used = False
+    for ev in events:
+        name = ev.get("event")
+        if name == "topic.done":
+            fetched += int(ev.get("fetched", 0))
+        elif name == "run.done":
+            kept = int(ev.get("kept", 0))
+            llm_used = bool(ev.get("llm_calls", 0))
+    return fetched, kept, llm_used
+
+
+async def _check_run_access(run_id: str, user: dict) -> None:
+    """校验当前用户是否有权访问该任务（管理员可访问全部，普通用户只能访问自己的）。"""
+    if auth.is_admin(user):
+        return
+    state = runs.get(run_id)
+    if state is not None:
+        if state.user_id != user["id"]:
+            raise HTTPException(status_code=403, detail="无权访问该任务")
+        return
+    row = await db.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if row["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+
+
 @app.post("/api/runs")
-async def create_run(request: RunRequest) -> JSONResponse:
+async def create_run(
+    request: RunRequest,
+    user: dict = Depends(auth.get_current_user),
+) -> JSONResponse:
     topics = [t.strip() for t in (request.topics or [request.topic]) if t and t.strip()]
     topics = list(dict.fromkeys(topics))[:5]
     if not topics:
@@ -177,98 +280,191 @@ async def create_run(request: RunRequest) -> JSONResponse:
         if find_node(request.field, (request.subfield, request.subfield3)) is None:
             raise HTTPException(status_code=400, detail=f"未知三级学科：{request.subfield3}")
     run_id = uuid.uuid4().hex[:12]
-    state = RunState(id=run_id, topic=" / ".join(topics))
+    state = RunState(id=run_id, topic=" / ".join(topics), user_id=user["id"])
     runs[run_id] = state
+    # 落库：保存请求参数以便重启后可追溯
+    await db.insert_run(
+        run_id,
+        topic=" / ".join(topics),
+        params=request.model_dump(),
+        sources=request.sources,
+        days=request.days,
+        field=request.field,
+        user_id=user["id"],
+    )
     state.task = asyncio.create_task(_execute(state, request))
     return JSONResponse({"id": run_id, "status": state.status}, status_code=202)
 
 
 @app.get("/api/runs")
-async def list_runs() -> JSONResponse:
-    items = [
-        {
+async def list_runs(user: dict = Depends(auth.get_current_user)) -> JSONResponse:
+    is_admin = auth.is_admin(user)
+    filter_uid = None if is_admin else user["id"]
+    # 内存中活跃任务（queued/running）优先，再合并 DB 历史
+    active = {
+        r.id: {
             "id": r.id,
             "topic": r.topic,
             "status": r.status,
             "events": len(r.events),
             "error": r.error,
         }
-        for r in sorted(runs.values(), key=lambda x: x.id, reverse=True)
-    ]
+        for r in runs.values()
+        if is_admin or r.user_id == user["id"]
+    }
+    historical = await db.list_runs(
+        limit=settings_store.effective_settings().max_history, user_id=filter_uid
+    )
+    items: list[dict] = []
+    seen: set[str] = set()
+    for row in historical:
+        if row["id"] in active:
+            items.append(active[row["id"]])
+        else:
+            items.append({
+                "id": row["id"],
+                "topic": row["topic"],
+                "status": row["status"],
+                "events": row["kept"],
+                "error": row["error"],
+                "fetched": row["fetched"],
+                "kept": row["kept"],
+                "llm_used": row["llm_used"],
+                "created_at": row["created_at"],
+            })
+        seen.add(row["id"])
+    for rid, item in active.items():
+        if rid not in seen:
+            items.append(item)
     return JSONResponse({"items": items})
 
 
 @app.get("/api/runs/{run_id}")
-async def get_run(run_id: str) -> JSONResponse:
+async def get_run(
+    run_id: str, user: dict = Depends(auth.get_current_user)
+) -> JSONResponse:
+    await _check_run_access(run_id, user)
     state = runs.get(run_id)
-    if state is None:
+    if state is not None:
+        return JSONResponse(
+            {
+                "id": state.id,
+                "topic": state.topic,
+                "status": state.status,
+                "error": state.error,
+                "report_url": f"/api/runs/{state.id}/report" if state.run_dir else None,
+                "events": len(state.events),
+            }
+        )
+    row = await db.get_run(run_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="run not found")
     return JSONResponse(
         {
-            "id": state.id,
-            "topic": state.topic,
-            "status": state.status,
-            "error": state.error,
-            "report_url": f"/api/runs/{state.id}/report" if state.run_dir else None,
-            "events": len(state.events),
+            "id": row["id"],
+            "topic": row["topic"],
+            "status": row["status"],
+            "error": row["error"],
+            "report_url": f"/api/runs/{row['id']}/report" if row["run_dir"] else None,
+            "events": 0,
+            "fetched": row["fetched"],
+            "kept": row["kept"],
+            "llm_used": row["llm_used"],
+            "created_at": row["created_at"],
+            "finished_at": row["finished_at"],
         }
     )
 
 
 @app.get("/api/runs/{run_id}/events")
-async def stream_events(run_id: str) -> StreamingResponse:
+async def stream_events(
+    run_id: str, user: dict = Depends(auth.get_current_user)
+) -> StreamingResponse:
+    await _check_run_access(run_id, user)
     state = runs.get(run_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="run not found")
-
-    async def generate():
-        sent = 0
-        while True:
-            while sent < len(state.events):
-                record = state.events[sent]
-                sent += 1
-                yield f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
-                if record.get("event") == "stream.end":
+    if state is not None:
+        async def generate():
+            sent = 0
+            while True:
+                while sent < len(state.events):
+                    record = state.events[sent]
+                    sent += 1
+                    yield f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
+                    if record.get("event") == "stream.end":
+                        return
+                if state.status in {"done", "failed"} and sent >= len(state.events):
                     return
-            if state.status in {"done", "failed"} and sent >= len(state.events):
-                return
-            state.signal.clear()
-            try:
-                await asyncio.wait_for(state.signal.wait(), timeout=15)
-            except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
+                state.signal.clear()
+                try:
+                    await asyncio.wait_for(state.signal.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # 历史任务：从 DB 一次性回放事件
+    row = await db.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    events = await db.get_events(run_id)
+
+    async def generate_historical():
+        for record in events:
+            yield f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
-        generate(),
+        generate_historical(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @app.get("/api/runs/{run_id}/report")
-async def get_report(run_id: str) -> FileResponse:
-    state = runs.get(run_id)
-    if state is None or state.run_dir is None:
+async def get_report(
+    run_id: str, user: dict = Depends(auth.get_current_user)
+) -> FileResponse:
+    await _check_run_access(run_id, user)
+    run_dir = await _resolve_run_dir_async(run_id)
+    if run_dir is None:
         raise HTTPException(status_code=404, detail="report not ready")
-    path = state.run_dir / "report.html"
+    path = run_dir / "report.html"
     if not path.exists():
         raise HTTPException(status_code=404, detail="report not found")
     return FileResponse(path, media_type="text/html")
 
 
-@app.post("/api/runs/{run_id}/ask")
-async def ask_run(run_id: str, request: AskRequest) -> JSONResponse:
+async def _resolve_run_dir_async(run_id: str) -> Path | None:
     state = runs.get(run_id)
-    if state is None or state.run_dir is None:
+    if state is not None and state.run_dir is not None:
+        return state.run_dir
+    row = await db.get_run(run_id)
+    if row and row["run_dir"]:
+        return Path(row["run_dir"])
+    return None
+
+
+@app.post("/api/runs/{run_id}/ask")
+async def ask_run(
+    run_id: str, request: AskRequest, user: dict = Depends(auth.get_current_user)
+) -> JSONResponse:
+    await _check_run_access(run_id, user)
+    run_dir = await _resolve_run_dir_async(run_id)
+    if run_dir is None:
         raise HTTPException(status_code=404, detail="任务结果尚未就绪")
     result = await qa.answer(
-        request.question, state.run_dir, settings_store.effective_settings()
+        request.question, run_dir, settings_store.effective_settings()
     )
     return JSONResponse(result)
 
 
 @app.post("/api/cleanup")
-async def cleanup_reports(request: CleanupRequest) -> JSONResponse:
+async def cleanup_reports(
+    request: CleanupRequest, user: dict = Depends(auth.require_admin)
+) -> JSONResponse:
     active: set[Path] = set()
     for state in runs.values():
         if state.status != "running":
@@ -287,6 +483,13 @@ async def cleanup_reports(request: CleanupRequest) -> JSONResponse:
         dry_run=request.dry_run,
         exclude=active,
     )
+    removed_names = {path.name for path in result.removed}
+    # 同步清理 DB 中对应已删除的报告记录（按 run_dir 目录名匹配）
+    if not request.dry_run and removed_names:
+        all_runs = await db.list_runs(limit=5000)
+        for row in all_runs:
+            if row["run_dir"] and Path(row["run_dir"]).name in removed_names:
+                await db.delete_run(row["id"])
     return JSONResponse(
         {
             "removed": len(result.removed),
@@ -299,7 +502,9 @@ async def cleanup_reports(request: CleanupRequest) -> JSONResponse:
 
 
 @app.get("/api/subfields")
-async def list_subfields(field: str = "", parent: str = "") -> JSONResponse:
+async def list_subfields(
+    field: str = "", parent: str = "", user: dict = Depends(auth.get_current_user)
+) -> JSONResponse:
     if field and field not in FIELDS:
         raise HTTPException(status_code=400, detail="未知学科门类")
     if parent:
@@ -323,7 +528,10 @@ async def list_subfields(field: str = "", parent: str = "") -> JSONResponse:
 
 
 @app.get("/api/topics")
-async def topics(field: str = "", subfield: str = "", subfield3: str = "") -> JSONResponse:
+async def topics(
+    field: str = "", subfield: str = "", subfield3: str = "",
+    user: dict = Depends(auth.get_current_user),
+) -> JSONResponse:
     if field and field not in FIELDS:
         raise HTTPException(status_code=400, detail="未知学科门类")
     if subfield3:
@@ -355,7 +563,9 @@ async def topics(field: str = "", subfield: str = "", subfield3: str = "") -> JS
 
 
 @app.get("/api/sources")
-async def list_sources(field: str = "") -> JSONResponse:
+async def list_sources(
+    field: str = "", user: dict = Depends(auth.get_current_user)
+) -> JSONResponse:
     if field and field not in FIELDS:
         raise HTTPException(status_code=400, detail="未知学科门类")
     return JSONResponse(
@@ -368,12 +578,14 @@ async def list_sources(field: str = "") -> JSONResponse:
 
 
 @app.get("/api/settings")
-async def get_settings() -> JSONResponse:
+async def get_settings(user: dict = Depends(auth.require_admin)) -> JSONResponse:
     return JSONResponse(settings_store.describe())
 
 
 @app.put("/api/settings")
-async def put_settings(payload: SettingsUpdate) -> JSONResponse:
+async def put_settings(
+    payload: SettingsUpdate, user: dict = Depends(auth.require_admin)
+) -> JSONResponse:
     values = {
         key: (value.strip() if isinstance(value, str) else value)
         for key, value in payload.model_dump().items()
@@ -400,7 +612,7 @@ async def put_settings(payload: SettingsUpdate) -> JSONResponse:
 
 
 @app.post("/api/settings/test-model")
-async def test_model() -> JSONResponse:
+async def test_model(user: dict = Depends(auth.require_admin)) -> JSONResponse:
     settings = settings_store.effective_settings()
     if not settings.llm_enabled:
         return JSONResponse({"ok": False, "message": "未配置模型 API Key，先保存后再测试"})
@@ -422,7 +634,9 @@ async def test_model() -> JSONResponse:
 
 
 @app.post("/api/settings/test")
-async def test_settings(request: Request) -> JSONResponse:
+async def test_settings(
+    request: Request, user: dict = Depends(auth.require_admin)
+) -> JSONResponse:
     client_ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     hits = [t for t in _test_hits.get(client_ip, []) if now - t < 60]
@@ -473,6 +687,88 @@ async def test_settings(request: Request) -> JSONResponse:
 async def health() -> JSONResponse:
     settings = settings_store.effective_settings()
     return JSONResponse({"ok": True, "llm": settings.llm_enabled, "version": app.version})
+
+
+# ---------- 鉴权 ----------
+
+@app.post("/api/auth/login")
+async def login(payload: LoginRequest) -> JSONResponse:
+    user = await db.get_user_by_username(payload.username.strip())
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    if not auth.verify_password(payload.password, user["password_hash"], user["salt"]):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = auth.create_token(user["id"], user["username"], user["role"])
+    await db.update_user(user["id"], last_login_at=db._now())
+    return JSONResponse(
+        {
+            "token": token,
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "role": user["role"],
+            },
+        }
+    )
+
+
+@app.get("/api/auth/me")
+async def me(user: dict = Depends(auth.get_current_user)) -> JSONResponse:
+    return JSONResponse(user)
+
+
+# ---------- 用户管理（管理员） ----------
+
+@app.get("/api/users")
+async def list_users(user: dict = Depends(auth.require_admin)) -> JSONResponse:
+    return JSONResponse({"items": await db.list_users()})
+
+
+@app.post("/api/users")
+async def create_user(
+    payload: CreateUserRequest, user: dict = Depends(auth.require_admin)
+) -> JSONResponse:
+    existing = await db.get_user_by_username(payload.username)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    pw_hash, salt = auth.hash_password(payload.password)
+    uid = await db.create_user(payload.username, pw_hash, salt, role=payload.role)
+    created = await db.get_user(uid)
+    return JSONResponse(created, status_code=201)
+
+
+@app.put("/api/users/{user_id}")
+async def update_user(
+    user_id: int,
+    payload: UpdateUserRequest,
+    user: dict = Depends(auth.require_admin),
+) -> JSONResponse:
+    target = await db.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    fields: dict = {}
+    if payload.role is not None:
+        fields["role"] = payload.role
+    if payload.password is not None:
+        pw_hash, salt = auth.hash_password(payload.password)
+        fields["password_hash"] = pw_hash
+        fields["salt"] = salt
+    if fields:
+        await db.update_user(user_id, **fields)
+    return JSONResponse(await db.get_user(user_id))
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(
+    user_id: int, user: dict = Depends(auth.require_admin)
+) -> JSONResponse:
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="不能删除自己")
+    target = await db.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    await db.delete_user(user_id)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/")

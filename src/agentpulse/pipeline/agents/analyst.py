@@ -5,9 +5,9 @@ import json
 import re
 from collections import Counter
 
-from agentpulse.agents.base import Agent
-from agentpulse.models import Analysis, Paper
-from agentpulse.scoring import tokenize
+from agentpulse.pipeline.agents.base import Agent
+from agentpulse.core.models import Analysis, Paper
+from agentpulse.pipeline.scoring import tokenize
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 

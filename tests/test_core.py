@@ -12,21 +12,25 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agentpulse import cleanup, qa, settings_store
-from agentpulse.agents.critic import CriticAgent
-from agentpulse.agents.planner import PlannerAgent
-from agentpulse.agents.synthesizer import heuristic_synthesis
-from agentpulse.config import Settings
-from agentpulse.metrics import (
+from agentpulse.core import settings_store
+from agentpulse.infra import auth, db, metrics
+from agentpulse.pipeline import cleanup, qa
+from agentpulse.pipeline.agents.critic import CriticAgent
+from agentpulse.pipeline.agents.planner import PlannerAgent
+from agentpulse.pipeline.agents.synthesizer import heuristic_synthesis
+from agentpulse.core.config import Settings
+from agentpulse.infra.metrics import (
     VenueMetric,
     apply_quartiles,
+    fetch_venue_metrics,
     load_overrides,
     quality_for,
 )
-from agentpulse.models import Analysis, Paper, Synthesis, Theme
-from agentpulse.orchestrator import ALL_SOURCES, Pipeline
-from agentpulse.scoring import dedupe, rank
-from agentpulse.sources import (
+from agentpulse.core.models import Analysis, Paper, Synthesis, Theme
+from agentpulse.pipeline.orchestrator import ALL_SOURCES, Pipeline
+from agentpulse.pipeline.scoring import dedupe, rank
+from agentpulse.infra.sources import (
+    fetch_all,
     is_ieee,
     parse_biorxiv,
     parse_crossref_items,
@@ -39,7 +43,7 @@ from agentpulse.sources import (
     parse_zenodo,
     search_pubmed,
 )
-from agentpulse.taxonomy import (
+from agentpulse.core.taxonomy import (
     FIELD_SOURCES,
     TOPIC_PRESETS,
     children_of,
@@ -49,7 +53,7 @@ from agentpulse.taxonomy import (
     paper_matches_subfield,
     subfields_of,
 )
-from agentpulse.venues import (
+from agentpulse.core.venues import (
     pick_source,
     venue_from_comment,
     venue_matches,
@@ -328,6 +332,61 @@ class _CaptureHttp:
     async def get_text(self, url: str, params: dict) -> str:
         self.calls.append((url, params))
         return "<PubmedArticleSet/>"
+
+
+class ConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_all_dedupes_jobs_and_limits_parallelism(self):
+        active = 0
+        peak = 0
+        seen: list[str] = []
+
+        async def fake(http, query, limit, cutoff):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            seen.append(query)
+            await asyncio.sleep(0.05)
+            active -= 1
+            return []
+
+        settings = Settings(max_concurrency=2)
+        with patch("agentpulse.infra.sources.search_arxiv", fake):
+            papers, errors = await fetch_all(
+                None,
+                settings,
+                [("arxiv", "q1"), ("arxiv", "q1"), ("arxiv", "q2"), ("arxiv", "q3")],
+                30,
+            )
+        self.assertEqual(papers, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(seen), ["q1", "q2", "q3"])
+        self.assertLessEqual(peak, 2)
+
+    async def test_venue_metric_cache_skips_repeat_requests(self):
+        class FakeHttp:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_json(self, url, params=None, headers=None):
+                self.calls += 1
+                return {
+                    "results": [
+                        {
+                            "display_name": "Nature",
+                            "type": "journal",
+                            "works_count": 1000,
+                            "summary_stats": {"2yr_mean_citedness": 50.0},
+                        }
+                    ]
+                }
+
+        metrics.clear_cache()
+        fake = FakeHttp()
+        first = await fetch_venue_metrics(fake, ["Nature"], concurrency=2)
+        second = await fetch_venue_metrics(fake, ["Nature"], concurrency=2)
+        self.assertEqual(fake.calls, 1)
+        self.assertIn("nature", first)
+        self.assertIn("nature", second)
 
 
 class PubMedRequestTest(unittest.IsolatedAsyncioTestCase):
@@ -1015,6 +1074,190 @@ class CleanupTest(unittest.TestCase):
             remove, kept = cleanup.plan(root, keep=0, exclude={active})
         self.assertEqual(kept, [active])
         self.assertEqual(len(remove), 2)
+
+
+class DbPersistenceTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmp.name) / "test.db"
+        db.init_db(self._db_path)
+
+    def tearDown(self):
+        db.close_db()
+        self._tmp.cleanup()
+
+    async def test_insert_and_list_run(self):
+        await db.insert_run("r1", "agent memory", {"days": 30}, sources=["arxiv"], days=30)
+        runs = await db.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["id"], "r1")
+        self.assertEqual(runs[0]["status"], "queued")
+        self.assertEqual(runs[0]["topic"], "agent memory")
+
+    async def test_update_run_status_and_stats(self):
+        await db.insert_run("r1", "topic", {})
+        await db.update_run_status(
+            "r1", "done", run_dir="/tmp/r1", finished=True,
+            fetched=42, kept=10, llm_used=True,
+        )
+        row = await db.get_run("r1")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["fetched"], 42)
+        self.assertEqual(row["kept"], 10)
+        self.assertTrue(row["llm_used"])
+        self.assertIsNotNone(row["finished_at"])
+        self.assertEqual(row["run_dir"], "/tmp/r1")
+
+    async def test_failed_run_records_error(self):
+        await db.insert_run("r1", "topic", {})
+        await db.update_run_status("r1", "failed", error="RuntimeError: boom", finished=True)
+        row = await db.get_run("r1")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("boom", row["error"])
+
+    async def test_append_and_get_events_in_order(self):
+        await db.insert_run("r1", "topic", {})
+        for i in range(3):
+            await db.append_event("r1", i + 1, {"event": f"step{i}", "seq": i + 1})
+        events = await db.get_events("r1")
+        self.assertEqual(len(events), 3)
+        self.assertEqual([e["event"] for e in events], ["step0", "step1", "step2"])
+
+    async def test_get_run_returns_none_for_missing(self):
+        row = await db.get_run("nonexistent")
+        self.assertIsNone(row)
+
+    async def test_delete_old_runs_keeps_latest(self):
+        for i in range(5):
+            await db.insert_run(f"r{i}", f"topic{i}", {})
+        deleted = await db.delete_old_runs(keep=2)
+        self.assertEqual(deleted, 3)
+        remaining = await db.list_runs()
+        self.assertEqual(len(remaining), 2)
+
+    async def test_delete_run_cascades_events(self):
+        await db.insert_run("r1", "topic", {})
+        await db.append_event("r1", 1, {"event": "x"})
+        await db.delete_run("r1")
+        self.assertIsNone(await db.get_run("r1"))
+        self.assertEqual(await db.get_events("r1"), [])
+
+    async def test_restart_recovery_scenario(self):
+        """模拟重启：关闭再重新打开 DB，历史仍在。"""
+        await db.insert_run("r1", "persist topic", {"k": "v"})
+        await db.append_event("r1", 1, {"event": "run.done", "kept": 3})
+        await db.update_run_status("r1", "done", finished=True, kept=3)
+        db.close_db()
+
+        # 重新初始化（模拟进程重启）
+        db.init_db(self._db_path)
+        row = await db.get_run("r1")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["topic"], "persist topic")
+        events = await db.get_events("r1")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "run.done")
+
+
+class AuthTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmp.name) / "test.db"
+        db.init_db(self._db_path)
+
+    def tearDown(self):
+        db.close_db()
+        self._tmp.cleanup()
+
+    def test_password_hash_and_verify(self):
+        pw_hash, salt = auth.hash_password("secret123")
+        self.assertTrue(auth.verify_password("secret123", pw_hash, salt))
+        self.assertFalse(auth.verify_password("wrong", pw_hash, salt))
+
+    def test_password_salt_differs(self):
+        h1, s1 = auth.hash_password("same")
+        h2, s2 = auth.hash_password("same")
+        self.assertNotEqual(s1, s2)
+        self.assertNotEqual(h1, h2)
+
+    def test_jwt_create_and_decode(self):
+        token = auth.create_token(1, "alice", "user")
+        payload = auth.decode_token(token)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["sub"], "1")
+        self.assertEqual(payload["username"], "alice")
+        self.assertEqual(payload["role"], "user")
+
+    def test_jwt_invalid_signature(self):
+        token = auth.create_token(1, "alice", "user")
+        parts = token.split(".")
+        # 篡改 payload
+        bad = parts[0] + "." + parts[1][:-1] + "x" + "." + parts[2]
+        self.assertIsNone(auth.decode_token(bad))
+
+    def test_jwt_malformed(self):
+        self.assertIsNone(auth.decode_token("not.a.valid.token.extra"))
+
+    async def test_create_and_get_user(self):
+        pw_hash, salt = auth.hash_password("pass123")
+        uid = await db.create_user("bob", pw_hash, salt, role="user")
+        self.assertGreater(uid, 0)
+        user = await db.get_user(uid)
+        self.assertEqual(user["username"], "bob")
+        self.assertEqual(user["role"], "user")
+
+    async def test_get_user_by_username(self):
+        pw_hash, salt = auth.hash_password("pass123")
+        await db.create_user("carol", pw_hash, salt, role="admin")
+        user = await db.get_user_by_username("carol")
+        self.assertIsNotNone(user)
+        self.assertEqual(user["role"], "admin")
+        self.assertTrue(auth.verify_password("pass123", user["password_hash"], user["salt"]))
+
+    async def test_duplicate_username_rejected(self):
+        pw_hash, salt = auth.hash_password("pass123")
+        await db.create_user("dave", pw_hash, salt)
+        # 数据库层 username UNIQUE 约束
+        with self.assertRaises(Exception):
+            await db.create_user("dave", pw_hash, salt)
+
+    async def test_list_and_delete_user(self):
+        pw_hash, salt = auth.hash_password("pass123")
+        await db.create_user("u1", pw_hash, salt)
+        await db.create_user("u2", pw_hash, salt)
+        users = await db.list_users()
+        self.assertEqual(len(users), 2)
+        uid = users[0]["id"]
+        await db.delete_user(uid)
+        self.assertEqual(len(await db.list_users()), 1)
+
+    async def test_ensure_default_admin(self):
+        self.assertEqual(await db.user_count(), 0)
+        await db.ensure_default_admin()
+        self.assertEqual(await db.user_count(), 1)
+        admin = await db.get_user_by_username("admin")
+        self.assertIsNotNone(admin)
+        self.assertEqual(admin["role"], "admin")
+        # 再次调用不重复创建
+        await db.ensure_default_admin()
+        self.assertEqual(await db.user_count(), 1)
+
+    async def test_run_user_isolation(self):
+        pw_hash, salt = auth.hash_password("pass123")
+        uid1 = await db.create_user("iso1", pw_hash, salt)
+        uid2 = await db.create_user("iso2", pw_hash, salt)
+        await db.insert_run("r1", "topic1", {}, user_id=uid1)
+        await db.insert_run("r2", "topic2", {}, user_id=uid2)
+        runs_u1 = await db.list_runs(user_id=uid1)
+        runs_u2 = await db.list_runs(user_id=uid2)
+        runs_all = await db.list_runs()
+        self.assertEqual(len(runs_u1), 1)
+        self.assertEqual(runs_u1[0]["topic"], "topic1")
+        self.assertEqual(len(runs_u2), 1)
+        self.assertEqual(runs_u2[0]["topic"], "topic2")
+        self.assertEqual(len(runs_all), 2)
 
 
 if __name__ == "__main__":

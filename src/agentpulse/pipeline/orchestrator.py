@@ -1,25 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from agentpulse.agents import AnalystAgent, CuratorAgent, PlannerAgent, SynthesizerAgent
-from agentpulse.agents.critic import CriticAgent
-from agentpulse.config import Settings
-from agentpulse.html_report import render_html
-from agentpulse.http import HttpClient
-from agentpulse.llm import BudgetExceeded, LLMClient
-from agentpulse.metrics import fetch_venue_metrics, load_overrides
-from agentpulse.models import Paper, Plan, RunMeta
-from agentpulse.providers.offline import load_fixtures
-from agentpulse.render import render_report
-from agentpulse.sources import fetch_all, is_ieee, search_openalex_venue
-from agentpulse.taxonomy import paper_fields, paper_matches_subfield
-from agentpulse.trace import Trace
-from agentpulse.venues import venue_matches
+from agentpulse.pipeline.agents import AnalystAgent, CuratorAgent, PlannerAgent, SynthesizerAgent
+from agentpulse.pipeline.agents.critic import CriticAgent
+from agentpulse.core.config import Settings
+from agentpulse.pipeline.html_report import render_html
+from agentpulse.infra.http import HttpClient
+from agentpulse.infra.llm import BudgetExceeded, LLMClient
+from agentpulse.infra.metrics import fetch_venue_metrics, load_overrides
+from agentpulse.core.models import Paper, Plan, RunMeta
+from agentpulse.infra.providers.offline import load_fixtures
+from agentpulse.pipeline.render import render_report
+from agentpulse.infra.sources import fetch_all, is_ieee, search_openalex_venue
+from agentpulse.core.taxonomy import paper_fields, paper_matches_subfield
+from agentpulse.infra.trace import Trace
+from agentpulse.core.venues import venue_matches
 
 ALL_SOURCES = (
     "arxiv",
@@ -66,6 +67,11 @@ class Pipeline:
     def _stage(self, trace: Trace, agent: str, status: str, message: str, **extra: object) -> None:
         trace.event("stage", agent=agent, status=status, message=message, **extra)
 
+    @staticmethod
+    async def _write(path: Path, text: str) -> None:
+        """大文件落盘放线程池，避免阻塞事件循环（SSE 推送会因此卡顿）。"""
+        await asyncio.to_thread(path.write_text, text, encoding="utf-8")
+
     async def run(
         self,
         topic: str | None = None,
@@ -93,8 +99,11 @@ class Pipeline:
         trace = Trace(run_dir / "events.jsonl", listener=self.listener)
 
         try:
-            async with HttpClient(self.settings.request_timeout, self.settings.http_retries) as http, \
-                    LLMClient(self.effective) as llm:
+            async with HttpClient(
+                self.settings.request_timeout,
+                self.settings.http_retries,
+                max_connections=max(8, self.settings.max_concurrency * 4),
+            ) as http, LLMClient(self.effective) as llm:
                 planner = PlannerAgent(llm, self.effective, trace)
                 curator = CuratorAgent(llm, self.effective, trace)
                 analyst = AnalystAgent(llm, self.effective, trace)
@@ -154,6 +163,7 @@ class Pipeline:
                                 [p.venue for p in papers],
                                 self.settings.contact_email,
                                 load_overrides(),
+                                concurrency=self.settings.max_concurrency,
                             )
                             trace.event("metrics.venue", count=len(metrics))
                         except Exception as exc:
@@ -189,17 +199,25 @@ class Pipeline:
                     queries=list(dict.fromkeys(q for p in plans for q in p.queries))[:12],
                     notes="；".join(p.notes for p in plans if p.notes)[:400],
                 )
-                (run_dir / "plan.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-                (run_dir / "candidates.json").write_text(
-                    json.dumps([p.model_dump(mode="json") for p in kept], ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                await self._write(run_dir / "plan.json", plan.model_dump_json(indent=2))
+                await self._write(
+                    run_dir / "candidates.json",
+                    json.dumps(
+                        [p.model_dump(mode="json") for p in kept],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 )
 
                 self._stage(trace, "analyst", "running", "逐篇抽取问题、方法、贡献")
                 analyses = await analyst.run(kept)
-                (run_dir / "analyses.json").write_text(
-                    json.dumps([a.model_dump(mode="json") for a in analyses], ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                await self._write(
+                    run_dir / "analyses.json",
+                    json.dumps(
+                        [a.model_dump(mode="json") for a in analyses],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 )
                 self._stage(trace, "analyst", "done", f"完成 {len(analyses)} 篇精读")
 
@@ -222,11 +240,11 @@ class Pipeline:
                     ok=critique.ok, score=critique.score, mode=critique.mode,
                 )
 
-                (run_dir / "synthesis.json").write_text(
-                    synthesis.model_dump_json(indent=2), encoding="utf-8"
+                await self._write(
+                    run_dir / "synthesis.json", synthesis.model_dump_json(indent=2)
                 )
-                (run_dir / "critique.json").write_text(
-                    critique.model_dump_json(indent=2), encoding="utf-8"
+                await self._write(
+                    run_dir / "critique.json", critique.model_dump_json(indent=2)
                 )
 
                 window_end = date.today()
@@ -244,10 +262,14 @@ class Pipeline:
                     window_start=window_end - timedelta(days=days),
                     window_end=window_end,
                 )
-                report_md = render_report(meta, plan, kept, analyses, synthesis, critique, fetch_errors)
-                (run_dir / "report.md").write_text(report_md, encoding="utf-8")
-                report_html = render_html(meta, plan, kept, analyses, synthesis, critique, fetch_errors)
-                (run_dir / "report.html").write_text(report_html, encoding="utf-8")
+                report_md = await asyncio.to_thread(
+                    render_report, meta, plan, kept, analyses, synthesis, critique, fetch_errors
+                )
+                await self._write(run_dir / "report.md", report_md)
+                report_html = await asyncio.to_thread(
+                    render_html, meta, plan, kept, analyses, synthesis, critique, fetch_errors
+                )
+                await self._write(run_dir / "report.html", report_html)
                 self._stage(trace, "writer", "done", "Markdown 与 HTML 报告已落盘")
 
                 trace.event(

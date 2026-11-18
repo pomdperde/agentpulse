@@ -15,6 +15,93 @@ const qaMode = $("#qa-mode");
 let stream = null;
 let currentRunId = null;
 
+// ---------- 鉴权 ----------
+const TOKEN_KEY = "agentpulse_token";
+const USER_KEY = "agentpulse_user";
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+function clearAuth() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); }
+function getCurrentUser() {
+  try { return JSON.parse(localStorage.getItem(USER_KEY) || "null"); } catch { return null; }
+}
+function setCurrentUser(u) { localStorage.setItem(USER_KEY, JSON.stringify(u)); }
+function isAdmin() { return getCurrentUser()?.role === "admin"; }
+
+function apiHeaders(extra = {}) {
+  const h = { ...extra };
+  const t = getToken();
+  if (t) h["Authorization"] = `Bearer ${t}`;
+  return h;
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    headers: apiHeaders(options.headers || {}),
+  });
+  if (res.status === 401) {
+    clearAuth();
+    showLogin();
+    throw new Error("登录已过期，请重新登录");
+  }
+  return res;
+}
+
+function showLogin() {
+  $("#app").classList.add("hidden");
+  $("#login-overlay").classList.remove("hidden");
+}
+function hideLogin() {
+  $("#login-overlay").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+}
+
+async function doLogin(username, password) {
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  setToken(data.token);
+  setCurrentUser(data.user);
+  return data.user;
+}
+
+function doLogout() {
+  clearAuth();
+  showLogin();
+}
+
+async function bootstrapAuth() {
+  const token = getToken();
+  if (!token) { showLogin(); return; }
+  try {
+    const res = await apiFetch("/api/auth/me");
+    if (!res.ok) throw new Error("invalid");
+    const user = await res.json();
+    setCurrentUser(user);
+    renderUserBar();
+    hideLogin();
+  } catch {
+    clearAuth();
+    showLogin();
+  }
+}
+
+function renderUserBar() {
+  const u = getCurrentUser();
+  const bar = $("#user-bar");
+  if (!u || !bar) return;
+  bar.innerHTML = `<span class="user-name">${u.username}</span><span class="user-role ${u.role}">${u.role === "admin" ? "管理员" : "用户"}</span><button id="logout-btn" class="link-btn">退出</button>`;
+  $("#logout-btn").addEventListener("click", doLogout);
+  const adminOnly = u.role === "admin";
+  $("#user-mgmt-btn")?.classList.toggle("hidden", !adminOnly);
+  $("#settings-btn")?.classList.toggle("hidden", !adminOnly);
+  $("#cleanup-btn")?.classList.toggle("hidden", !adminOnly);
+}
+
 function now() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
@@ -83,7 +170,7 @@ async function loadFieldTopics(autoSwitch) {
     const params = new URLSearchParams({ field });
     if (subfield) params.set("subfield", subfield);
     if (subfield3) params.set("subfield3", subfield3);
-    const resp = await fetch(`/api/topics?${params.toString()}`);
+    const resp = await apiFetch(`/api/topics?${params.toString()}`);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
     const topics = data.topics || [];
@@ -110,7 +197,7 @@ async function loadFieldTopics(autoSwitch) {
 async function loadSources(field) {
   if (!field) return;
   try {
-    const resp = await fetch(`/api/sources?field=${encodeURIComponent(field)}`);
+    const resp = await apiFetch(`/api/sources?field=${encodeURIComponent(field)}`);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
     const recommended = data.sources || [];
@@ -137,7 +224,7 @@ async function loadSubfields(autoLoadTopics) {
   }
   await loadSources(field);
   try {
-    const resp = await fetch(`/api/subfields?field=${encodeURIComponent(field)}`);
+    const resp = await apiFetch(`/api/subfields?field=${encodeURIComponent(field)}`);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
     (data.subfields || []).forEach((node) => {
@@ -161,7 +248,7 @@ async function loadChildren(autoLoadTopics) {
   if (field && parent) {
     try {
       const params = new URLSearchParams({ field, parent });
-      const resp = await fetch(`/api/subfields?${params.toString()}`);
+      const resp = await apiFetch(`/api/subfields?${params.toString()}`);
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const data = await resp.json();
       (data.subfields || []).forEach((node) => {
@@ -181,7 +268,6 @@ $("#field").addEventListener("change", () => loadSubfields(true));
 $("#subfield").addEventListener("change", () => loadChildren(true));
 $("#subfield3").addEventListener("change", () => loadFieldTopics(true));
 $("#topic1").addEventListener("input", markActiveChip);
-loadSubfields(false);
 
 $("#clear-log").addEventListener("click", () => {
   logEl.textContent = "";
@@ -192,7 +278,7 @@ $("#close-report").addEventListener("click", () => {
 });
 
 function finishRun(runId) {
-  fetch(`/api/runs/${runId}`)
+  apiFetch(`/api/runs/${runId}`)
     .then((res) => res.json())
     .then((data) => {
       if (data.status !== "done" || !data.report_url) return;
@@ -204,59 +290,54 @@ function finishRun(runId) {
     .catch((err) => appendLog(`读取结果失败：${err}`, "er"));
 }
 
-function connectEvents(runId) {
-  if (stream) stream.close();
+async function connectEvents(runId) {
+  if (stream) stream.abort();
   currentRunId = runId;
   let ended = false;
-  stream = new EventSource(`/api/runs/${runId}/events`);
-
-  stream.onmessage = (event) => {
-    let data;
-    try {
-      data = JSON.parse(event.data);
-    } catch {
-      return;
+  stream = new AbortController();
+  try {
+    const res = await apiFetch(`/api/runs/${runId}/events`, { signal: stream.signal });
+    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        let data;
+        try { data = JSON.parse(line.slice(5).trim()); } catch { continue; }
+        const name = data.event || "";
+        if (name === "stage") {
+          const st = data.status === "running" ? "running" : data.status === "done" ? "done" : "failed";
+          setAgent(data.agent, st, data.message || "");
+          appendLog(`${data.agent} · ${data.message || data.status}`);
+        } else if (name === "run.start") {
+          appendLog(`任务开始：${data.topic}（窗口 ${data.days} 天）`);
+        } else if (name === "run.done") {
+          appendLog(`流水线完成：精选 ${data.kept} 篇，模型调用 ${data.llm_calls} 次`, "ok");
+        } else if (name === "run.error" || name === "run.failed") {
+          appendLog(`运行失败：${data.error}`, "er");
+          document.querySelectorAll('.agent[data-status="running"]').forEach((card) => { card.dataset.status = "failed"; });
+        } else if (name === "run.complete") {
+          ended = true;
+          finishRun(runId);
+          runBtn.disabled = false;
+        } else if (name === "stream.end") {
+          ended = true;
+          runBtn.disabled = false;
+        }
+      }
     }
-    const name = data.event || "";
-
-    if (name === "stage") {
-      const status = data.status === "running" ? "running" : data.status === "done" ? "done" : "failed";
-      setAgent(data.agent, status, data.message || "");
-      appendLog(`${data.agent} · ${data.message || data.status}`);
-      return;
-    }
-    if (name === "run.start") {
-      appendLog(`任务开始：${data.topic}（窗口 ${data.days} 天）`);
-      return;
-    }
-    if (name === "run.done") {
-      appendLog(`流水线完成：精选 ${data.kept} 篇，模型调用 ${data.llm_calls} 次`, "ok");
-      return;
-    }
-    if (name === "run.error" || name === "run.failed") {
-      appendLog(`运行失败：${data.error}`, "er");
-      document.querySelectorAll('.agent[data-status="running"]').forEach((card) => {
-        card.dataset.status = "failed";
-      });
-      return;
-    }
-    if (name === "run.complete") {
-      ended = true;
-      finishRun(runId);
-      runBtn.disabled = false;
-      return;
-    }
-    if (name === "stream.end") {
-      ended = true;
-      stream.close();
-      runBtn.disabled = false;
-    }
-  };
-
-  stream.onerror = () => {
-    if (ended) return;
-    appendLog("事件流中断，尝试重连…", "er");
-  };
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    if (!ended) appendLog(`事件流中断：${err.message}`, "er");
+  }
 }
 
 async function startRun(event) {
@@ -283,7 +364,7 @@ async function startRun(event) {
   appendLog(`提交任务：${topic}`);
 
   try {
-    const res = await fetch("/api/runs", {
+    const res = await apiFetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -357,7 +438,7 @@ async function askQuestion(event) {
   qaSubmit.disabled = true;
 
   try {
-    const res = await fetch(`/api/runs/${currentRunId}/ask`, {
+    const res = await apiFetch(`/api/runs/${currentRunId}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
@@ -386,7 +467,7 @@ cleanupBtn.addEventListener("click", async () => {
   cleanupBtn.disabled = true;
   cleanupBtn.textContent = "清理中…";
   try {
-    const resp = await fetch("/api/cleanup", {
+    const resp = await apiFetch("/api/cleanup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keep: 20 }),
@@ -409,4 +490,101 @@ cleanupBtn.addEventListener("click", async () => {
   }
 });
 
-checkHealth();
+// ---------- 用户管理 ----------
+const umDrawer = $("#usermgmt-drawer");
+const umMask = $("#usermgmt-mask");
+function umToast(text, kind) {
+  const t = $("#um-toast");
+  t.textContent = text || "";
+  t.className = "hint" + (kind ? " " + kind : "");
+}
+async function loadUsers() {
+  try {
+    const res = await apiFetch("/api/users");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const list = $("#um-list");
+    const me = getCurrentUser();
+    list.innerHTML = "";
+    (data.items || []).forEach((u) => {
+      const row = document.createElement("div");
+      row.className = "user-row";
+      const isSelf = u.id === me.id;
+      row.innerHTML = `
+        <div class="user-info"><b>${u.username}</b><span class="user-role ${u.role}">${u.role === "admin" ? "管理员" : "用户"}</span>${isSelf ? "<span class='tag'>当前</span>" : ""}</div>
+        <div class="user-actions">
+          ${!isSelf ? `<select class="um-role-sel" data-id="${u.id}"><option value="user"${u.role==="user"?" selected":""}>用户</option><option value="admin"${u.role==="admin"?" selected":""}>管理员</option></select>
+          <button class="ghost um-reset" data-id="${u.id}">改密</button>
+          <button class="ghost um-del" data-id="${u.id}">删除</button>` : ""}
+        </div>`;
+      list.appendChild(row);
+    });
+    list.querySelectorAll(".um-role-sel").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        const id = sel.dataset.id;
+        try { await apiFetch(`/api/users/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: sel.value }) }); umToast("角色已更新", "ok"); loadUsers(); }
+        catch (e) { umToast(e.message, "er"); }
+      });
+    });
+    list.querySelectorAll(".um-reset").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        const np = prompt("输入新密码（至少 6 位）：");
+        if (!np) return;
+        try { await apiFetch(`/api/users/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: np }) }); umToast("密码已重置", "ok"); }
+        catch (e) { umToast(e.message, "er"); }
+      });
+    });
+    list.querySelectorAll(".um-del").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("确定删除该用户？其历史任务仍保留。")) return;
+        const id = btn.dataset.id;
+        try { await apiFetch(`/api/users/${id}`, { method: "DELETE" }); umToast("已删除", "ok"); loadUsers(); }
+        catch (e) { umToast(e.message, "er"); }
+      });
+    });
+  } catch (e) { umToast(e.message, "er"); }
+}
+function openUserMgmt() { umDrawer.classList.remove("hidden"); umMask.classList.remove("hidden"); loadUsers(); }
+function closeUserMgmt() { umDrawer.classList.add("hidden"); umMask.classList.add("hidden"); }
+$("#user-mgmt-btn").addEventListener("click", openUserMgmt);
+$("#usermgmt-close").addEventListener("click", closeUserMgmt);
+umMask.addEventListener("click", closeUserMgmt);
+$("#um-create").addEventListener("click", async () => {
+  const username = $("#um-username").value.trim();
+  const password = $("#um-password").value;
+  const role = $("#um-role").value;
+  if (!username || !password) { umToast("请填写用户名和密码", "er"); return; }
+  try {
+    const res = await apiFetch("/api/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password, role }) });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || "HTTP " + res.status); }
+    umToast(`已创建用户 ${username}`, "ok");
+    $("#um-username").value = ""; $("#um-password").value = "";
+    loadUsers();
+  } catch (e) { umToast(e.message, "er"); }
+});
+
+// ---------- 登录表单 ----------
+$("#login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#login-submit");
+  const msg = $("#login-msg");
+  btn.disabled = true;
+  msg.textContent = "登录中…";
+  msg.className = "";
+  try {
+    const user = await doLogin($("#login-username").value, $("#login-password").value);
+    renderUserBar();
+    hideLogin();
+    checkHealth();
+    loadSubfields(false);
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "err";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------- 启动 ----------
+bootstrapAuth();

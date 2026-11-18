@@ -5,9 +5,9 @@ import os
 import threading
 from pathlib import Path
 
-from agentpulse.config import Settings
+from agentpulse.core.config import Settings
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 STORE_PATH = ROOT / "data" / "settings.json"
 
 # 只允许通过设置页维护这些字段，其余配置仍由环境变量 / .env 管理

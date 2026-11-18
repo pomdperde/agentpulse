@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from agentpulse.config import Settings
+from agentpulse.core.config import Settings
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", re.S)
 

@@ -48,8 +48,31 @@ Renderer 生成 HTML / Markdown 报告
 | 依赖 | FastAPI + Uvicorn + httpx + Pydantic，无数据库、无 Node.js |
 | 进程 | **必须单进程**（任务状态在内存中，`--workers 2` 会导致进度查不到） |
 | 端口 | 默认 8123 |
-| 磁盘 | 约 300 MB（依赖 + 报告） |
+| 磁盘 | 约 300 MB（依赖 + 报告）+ SQLite 任务历史库 |
 | 内存 | 常驻约 20–30 MB，单轮全源抓取峰值约 70 MB |
+
+### 1.4 任务历史持久化
+
+任务元数据与事件流持久化到 SQLite 单文件（`data/agentpulse.db`），重启服务后历史任务、统计信息、报告链接、事件回放均可恢复。报告文件仍在 `reports/` 目录。
+
+- 默认路径 `data/agentpulse.db`，可通过 `DB_PATH` 环境变量修改
+- 历史上限默认 500 条，通过 `MAX_HISTORY` 控制
+- 重启时若 DB 中有 `queued`/`running` 状态的任务，会自动标记为 `failed`（进程重启无法恢复执行中的任务）
+- 清理报告时会同步删除对应 DB 记录
+
+### 1.5 多用户鉴权
+
+内置基于 JWT 的多用户登录体系，无需额外依赖（JWT 与密码哈希均用 Python 标准库实现）。
+
+- **用户表**：`users`（SQLite），字段含用户名、密码哈希（PBKDF2-HMAC-SHA256，10 万轮 + 随机盐）、角色
+- **角色**：`admin`（管理员）/ `user`（普通用户）
+- **默认账号**：首次启动自动创建 `admin` / `admin123`，请登录后立即修改密码
+- **令牌**：JWT（HS256），存于浏览器 `localStorage`，通过 `Authorization: Bearer <token>` 头传递
+- **权限**：
+  - 所有 `/api/runs/*`、`/api/subfields`、`/api/topics`、`/api/sources` 需登录
+  - `/api/settings/*`、`/api/cleanup`、`/api/users/*` 仅管理员
+  - 普通用户只能看到自己的任务历史；管理员可看全部
+- **生产环境**：务必设置 `AUTH_SECRET` 环境变量（随机长字符串），否则重启后所有令牌失效
 
 ---
 
@@ -166,6 +189,10 @@ python -m agentpulse serve --port 8123
 | `REQUEST_TIMEOUT` | HTTP 超时（秒） | 30 |
 | `LLM_TIMEOUT` | 模型超时（秒） | 120 |
 | `HTTP_RETRIES` | HTTP 重试次数 | 3 |
+| `DB_PATH` | SQLite 任务历史库路径 | `data/agentpulse.db` |
+| `MAX_HISTORY` | 任务列表返回上限 | 500 |
+| `AUTH_SECRET` | JWT 签名密钥（生产必填） | 空 → 进程随机生成 |
+| `TOKEN_EXPIRE_DAYS` | 令牌有效期（天） | 7 |
 
 ### 3.3 网页配置页
 
@@ -376,7 +403,7 @@ pulse.example.com {
 }
 ```
 
-应用本身**没有登录**，对外暴露前至少加一层 Basic Auth：
+应用内置了多用户 JWT 登录（见 1.5 节），对外暴露时建议同时加一层 Nginx Basic Auth 作为额外防护：
 
 ```bash
 sudo htpasswd -c /etc/nginx/.htpasswd youruser
@@ -492,7 +519,9 @@ AgentPulse/
 │  └─ web.py cli.py         # 入口
 ├─ web/                     # 前端单页：index.html / styles.css / app.js / settings.js
 ├─ tests/test_core.py       # 单元测试
-├─ data/settings.json       # 网页保存的配置（自动生成）
+├─ data/
+│  ├─ settings.json       # 网页保存的配置（自动生成）
+│  └─ agentpulse.db       # 任务历史与事件流（SQLite，自动生成）
 ├─ reports/<时间>-<主题>/   # 每轮产物
 │  ├─ plan.json candidates.json analyses.json synthesis.json critique.json
 │  ├─ events.jsonl report.md report.html
@@ -500,11 +529,22 @@ AgentPulse/
 └─ pyproject.toml
 ```
 
-升级时保留 `data/` 与 `reports/`，其余目录整份覆盖即可。
+升级时保留 `data/`（含 `settings.json` 与 `agentpulse.db`）与 `reports/`，其余目录整份覆盖即可。
+
+> 备份建议：定期备份 `data/agentpulse.db`（任务历史）与 `reports/`（报告产物）。`agentpulse.db` 是 SQLite 单文件，可直接 `cp` 或 `sqlite3 .backup`。
 
 ---
 
 ## 8. 运维与排障
+
+### 8.1 并发与性能
+
+- `MAX_CONCURRENCY`（默认 4）：单个任务内的并发抓取数，同时也是精读批处理与影响力查询的并发上限。网络状况好可调到 6–8；频繁遇到 429 则降到 2–3
+- 各数据源并发抓取，单个源失败只降级不阻塞；Semantic Scholar 单独做 1 rps 串行，不占用其它源的并发槽位
+- 期刊影响力查询结果在进程内缓存 6 小时，多主题任务与重复运行不会重复请求 OpenAlex
+- 报告渲染与 JSON 落盘在线程池执行，生成长报告时不会阻塞 SSE 进度推送
+- HTTP 连接池大小随 `MAX_CONCURRENCY` 自动放大（`max_concurrency × 4`）
+- 必须单进程运行：任务状态与缓存都在内存中，多 worker 会导致进度查不到、缓存失效
 
 | 现象 | 原因与处理 |
 |---|---|

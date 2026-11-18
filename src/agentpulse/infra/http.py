@@ -25,12 +25,16 @@ class HttpClient:
     参数写错再重试只会把一次小错放大成请求风暴。
     """
 
-    def __init__(self, timeout: float = 30.0, retries: int = 3):
+    def __init__(self, timeout: float = 30.0, retries: int = 3, max_connections: int = 20):
         self.retries = max(1, retries)
         self._client = httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
             headers={"User-Agent": USER_AGENT},
+            limits=httpx.Limits(
+                max_connections=max(4, max_connections),
+                max_keepalive_connections=max(4, max_connections // 2),
+            ),
         )
 
     async def close(self) -> None:

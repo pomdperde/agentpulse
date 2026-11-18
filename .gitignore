@@ -8,6 +8,8 @@ __pycache__/
 # 本地配置与密钥
 .env
 data/settings.json
+data/*.db
+data/*.db-*
 
 # 运行产物
 reports/

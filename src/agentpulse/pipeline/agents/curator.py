@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from agentpulse.agents.base import Agent
-from agentpulse.metrics import VenueMetric
-from agentpulse.models import Paper, Plan
-from agentpulse.scoring import dedupe, rank
+from agentpulse.pipeline.agents.base import Agent
+from agentpulse.infra.metrics import VenueMetric
+from agentpulse.core.models import Paper, Plan
+from agentpulse.pipeline.scoring import dedupe, rank
 
 
 class CuratorAgent(Agent):

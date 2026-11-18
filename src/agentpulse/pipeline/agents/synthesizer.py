@@ -4,9 +4,9 @@ import json
 import re
 from collections import Counter
 
-from agentpulse.agents.base import Agent
-from agentpulse.models import Analysis, Paper, Synthesis, Theme
-from agentpulse.taxonomy import classify_field
+from agentpulse.pipeline.agents.base import Agent
+from agentpulse.core.models import Analysis, Paper, Synthesis, Theme
+from agentpulse.core.taxonomy import classify_field
 
 _SYSTEM = """你是综述归纳专家。基于给定的论文结构化分析，产出主题聚类与趋势判断。
 要求：

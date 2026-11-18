@@ -4,7 +4,7 @@ import re
 
 from typing import NamedTuple
 
-from agentpulse.models import Paper
+from agentpulse.core.models import Paper
 
 # Google Scholar Metrics 式的一级学科门类（合并自 24 个 Scholar Metrics top-level subject areas）。
 # 参考 https://scholar.google.com/citations?view_op=top_venues 分组。

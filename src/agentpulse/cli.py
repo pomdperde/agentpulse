@@ -6,12 +6,12 @@ import json
 import sys
 from pathlib import Path
 
-from agentpulse.cleanup import clean
-from agentpulse.config import Settings
-from agentpulse.llm import BudgetExceeded
-from agentpulse.orchestrator import ALL_SOURCES, Pipeline
-from agentpulse.settings_store import effective_settings
-from agentpulse.taxonomy import (
+from agentpulse.pipeline.cleanup import clean
+from agentpulse.core.config import Settings
+from agentpulse.infra.llm import BudgetExceeded
+from agentpulse.pipeline.orchestrator import ALL_SOURCES, Pipeline
+from agentpulse.core.settings_store import effective_settings
+from agentpulse.core.taxonomy import (
     FIELDS,
     children_of,
     find_node,
@@ -227,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "serve":
-        from agentpulse.web import serve
+        from agentpulse.api.web import serve
 
         serve(port=args.port, host=args.host)
         return 0

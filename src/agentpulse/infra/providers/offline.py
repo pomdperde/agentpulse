@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agentpulse.models import Paper
+from agentpulse.core.models import Paper
 
 
 def _fixture_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "data" / "fixtures.json"
+    return Path(__file__).resolve().parents[4] / "data" / "fixtures.json"
 
 
 def load_fixtures() -> list[Paper]:

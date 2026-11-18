@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from agentpulse.config import Settings
-from agentpulse.llm import LLMClient
-from agentpulse.trace import Trace
+from agentpulse.core.config import Settings
+from agentpulse.infra.llm import LLMClient
+from agentpulse.infra.trace import Trace
 
 
 class Agent:

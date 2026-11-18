@@ -16,13 +16,15 @@
     </div>
   </div>
   <div class="topbar-actions">
+    <div id="user-bar" class="user-bar"></div>
+    <button id="user-mgmt-btn" class="ghost hidden" type="button">用户管理</button>
     <button id="cleanup-btn" class="ghost" type="button" title="清理本地历史报告，保留最近 20 轮">清理记录</button>
     <button id="settings-btn" class="ghost" type="button">配置</button>
     <div class="health" id="health">检查服务中…</div>
   </div>
 </header>
 
-<main class="layout">
+<main class="layout" id="app">
   <section class="panel form-panel">
     <h2>检索配置</h2>
     <div class="field">
@@ -275,6 +277,58 @@
     <p class="hint">优先级：环境变量 &gt; data/settings.json &gt; .env。密钥不回显明文，不写入日志与报告。</p>
   </div>
 </aside>
+
+<div class="drawer-mask hidden" id="usermgmt-mask"></div>
+<aside class="drawer hidden" id="usermgmt-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <h2>用户管理</h2>
+      <p>管理员可创建、修改角色或重置密码</p>
+    </div>
+    <button id="usermgmt-close" class="ghost" type="button">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <h3 class="drawer-sub">创建用户</h3>
+    <div class="row">
+      <label class="field"><span>用户名</span><input id="um-username" type="text" placeholder="2-64 位"></label>
+      <label class="field"><span>密码</span><input id="um-password" type="password" placeholder="至少 6 位"></label>
+    </div>
+    <label class="field">
+      <span>角色</span>
+      <select id="um-role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+    </label>
+    <div class="drawer-actions">
+      <button id="um-create" class="primary" type="button">创建</button>
+    </div>
+    <p id="um-toast" class="hint" aria-live="polite"></p>
+
+    <h3 class="drawer-sub">已有用户</h3>
+    <div id="um-list" class="user-list"></div>
+  </div>
+</aside>
+
+<div class="login-overlay hidden" id="login-overlay">
+  <div class="login-card">
+    <div class="login-brand">
+      <span class="logo">◈</span>
+      <h1>AgentPulse</h1>
+      <p>多智能体 · Agent 热点检索与论文汇总</p>
+    </div>
+    <form id="login-form">
+      <label class="field">
+        <span>用户名</span>
+        <input id="login-username" type="text" autocomplete="username" autofocus required>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+      </label>
+      <button id="login-submit" class="primary login-submit" type="submit">登录</button>
+      <p id="login-msg" class="hint"></p>
+    </form>
+    <p class="login-hint">首次启动默认管理员：<code>admin</code> / <code>admin123</code>，请登录后及时修改密码。</p>
+  </div>
+</div>
 
 <script src="/assets/app.js"></script>
 <script src="/assets/settings.js"></script>
